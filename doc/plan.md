@@ -796,8 +796,29 @@ Open questions from milestone 3:
   (`main.js`'s `runGenerateEffect`), with `app.render` only ever mounting it empty and
   never touching its text again -- only the single final `generate-done`/`generate-error`
   result still reaches `app.core` via the Repl, matching every other effect's one-call
-  shape (doc/plan.md §7). **Not yet re-verified on the device that crashed.** If this
-  doesn't fix it, the next suspect is the main-Repl reentrancy question two bullets up
-  (this fix removes a lot of `repl.eval()` traffic during streaming but the
-  `generate-token` calls it removed weren't the *only* main-Repl activity happening
-  during that window -- render! calls from any other concurrent dispatch! still are).
+  shape (doc/plan.md §7). **Confirmed fixed** on the device that crashed -- streaming no
+  longer crashes the tab.
+- **Real-world finding**: with streaming no longer crashing, the same "mortgage with
+  extra principal" prompt against the Together provider (`meta-llama/Llama-3.3-70B-
+  Instruct-Turbo`) went through all `app.genpipe/max-attempts` repair attempts and gave
+  up with "could not parse source: not valid Clojure" every time -- reported as looking
+  like the response was still streaming when the app moved to the next attempt, and
+  nothing visibly malformed in the streamed text up to that point. That combination
+  (parse failure + looks like it stopped mid-thought + happens on repair attempts too,
+  which get fresh generations) pointed at silent truncation rather than the model
+  writing bad syntax: `max_tokens: 2000` cutting the response off mid-form before it
+  could close its parens, which looks identical to a normal response right up to the
+  cutoff. Fixed three ways: (1) `max_tokens` raised to 4000 in both
+  `proxy/providers/anthropic.mjs` and `together.mjs`; (2) both now check the
+  provider's own truncation signal (`finish_reason: "length"` / `stop_reason:
+  "max_tokens"`) and throw a clear error immediately instead of silently yielding a
+  partial response that fails downstream with a confusing parse error; (3)
+  `prompts/system.md`'s output-format instruction was softened from "a short sentence
+  ... is fine" to explicitly forbidding preamble/explanation, since every token spent
+  on prose was a token not available to finish the code -- and `proxy/prompts.mjs`'s
+  repair turn now includes a "your response may have been cut off, be more concise"
+  hint whenever the failure looks truncation-shaped (parse failure or an explicit
+  max_tokens error), including on the no-prior-source repair path (a gap found while
+  fixing this: a repair attempt following a `generate-error`, as opposed to a failed
+  `install`, had no source to show back and was silently retrying with zero context
+  about what went wrong). **Not yet re-verified against the actual failing prompt.**

@@ -7,8 +7,10 @@ leniently by a human.
 
 ## Output format
 
-Respond with **exactly one fenced code block** and nothing else of substance (a short
-sentence before or after the fence is fine and will be discarded):
+Respond with **only the fenced code block below — no preamble, no explanation, no
+summary before or after it.** Every token spent on prose is a token not spent finishing
+the code within the response budget; an incomplete response fails outright, so brevity
+outside the fence is not a style preference, it's a correctness requirement:
 
 ```clojure
 (calculator

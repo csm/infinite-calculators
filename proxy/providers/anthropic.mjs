@@ -14,7 +14,12 @@ export async function* streamCompletion({ apiKey, model, system, messages }) {
       'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',
     },
-    body: JSON.stringify({ model, max_tokens: 2000, system, messages, stream: true }),
+    // 4000 for headroom against a verbose response getting cut off mid-form
+    // (see proxy/providers/together.mjs's comment -- found on that
+    // provider, but the same risk applies here); truncation is now also
+    // detected explicitly below via stop_reason rather than left to fail
+    // parsing downstream with a confusing error.
+    body: JSON.stringify({ model, max_tokens: 4000, system, messages, stream: true }),
   });
 
   if (!resp.ok || !resp.body) {
@@ -43,6 +48,8 @@ export async function* streamCompletion({ apiKey, model, system, messages }) {
       }
       if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta') {
         yield evt.delta.text;
+      } else if (evt.type === 'message_delta' && evt.delta?.stop_reason === 'max_tokens') {
+        throw new Error('response was cut off by the token limit before it finished (max_tokens)');
       } else if (evt.type === 'error') {
         throw new Error(evt.error?.message || 'Anthropic stream error');
       }
