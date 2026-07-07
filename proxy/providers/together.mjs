@@ -22,9 +22,12 @@ export async function* streamCompletion({ apiKey, model, system, messages }) {
       // (silently, since a truncated response looks the same as a complete
       // one until something tries to parse it), which surfaced downstream
       // as a confusing "could not parse source" error instead of a clear
-      // truncation one. Raised for headroom; also now detected explicitly
-      // below via finish_reason rather than left to fail parsing later.
-      max_tokens: 4000,
+      // truncation one. Raised to 4000, then to 8000 after truncation
+      // errors kept recurring across multiple models (some apparently
+      // spend a lot of budget on reasoning/commentary before the code);
+      // also now detected explicitly below via finish_reason rather than
+      // left to fail parsing later.
+      max_tokens: 8000,
       stream: true,
     }),
   });

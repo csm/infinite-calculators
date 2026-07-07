@@ -14,12 +14,12 @@ export async function* streamCompletion({ apiKey, model, system, messages }) {
       'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',
     },
-    // 4000 for headroom against a verbose response getting cut off mid-form
+    // 8000 for headroom against a verbose response getting cut off mid-form
     // (see proxy/providers/together.mjs's comment -- found on that
     // provider, but the same risk applies here); truncation is now also
     // detected explicitly below via stop_reason rather than left to fail
     // parsing downstream with a confusing error.
-    body: JSON.stringify({ model, max_tokens: 4000, system, messages, stream: true }),
+    body: JSON.stringify({ model, max_tokens: 8000, system, messages, stream: true }),
   });
 
   if (!resp.ok || !resp.body) {

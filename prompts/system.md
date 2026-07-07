@@ -86,6 +86,16 @@ The map passed to `calculator` has five keys, all required:
    stopped by an external watchdog killing the whole sandbox, which is disruptive to the
    user. The literal cap is your only real safety net, so it must not itself depend on
    input values that could be wrong.
+8. **Every output with a numeric `:format` (`:currency`, `:percent`, `:integer`,
+   `:decimal`) must stay a finite number for every input in its declared `:min`/`:max`
+   range, not just the declared `:default` values** — the defaults are what gets
+   smoke-tested first, but a real user will move the sliders. Guard every division
+   explicitly (check the denominator, don't assume a formula "can't" produce zero) and
+   trace where each value actually comes from: a loop counter used as a numeric output
+   (e.g. "months to pay off") must be the counter itself, incremented/decremented once
+   per iteration — never a value computed by dividing by something that could be zero,
+   or by any other formula that could produce infinity or NaN. If a counter and a
+   derived value would ever disagree, the counter is the one that's actually correct.
 
 ## Repair attempts
 
