@@ -68,6 +68,20 @@ class CalcWorker {
   }
 
   async install(source, deadlineMs = INSTALL_DEADLINE_MS) {
+    // Real-world finding: repeated installs into the same long-lived
+    // worker (every generation attempt, retry, and manual apply targets
+    // the same calc-id, so the same worker/Repl) accumulate memory in the
+    // sandbox Repl -- each `(def installed-calc ...)` redefinition doesn't
+    // reliably release the previous calculator's closures (doc/plan.md's
+    // "namespace teardown in a long-lived sandbox Repl" open question, §13).
+    // Over enough iterations in one session this exhausted the wasm
+    // module's memory and trapped with "unreachable code should not be
+    // executed" -- an OOM abort, not the type-mismatch panic first
+    // suspected. Respawning fresh on every install (not just compute/logic,
+    // which don't redefine anything and don't need it) guarantees no
+    // memory ever carries over between installs; the ~50ms respawn cost
+    // (measured in doc/plan.md §5) is paid once per install, not per call.
+    this._respawn();
     const result = await this._send('install', { source }, deadlineMs);
     if (result.ok) this.lastGoodSource = source;
     else if (result.timedOut) await this._reinstallLastGood();

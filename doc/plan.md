@@ -733,9 +733,10 @@ Open questions to resolve during milestones 1–2:
   its own copy? (Affects memory and startup; either works functionally.)
 - `Math/*` availability and float semantics in the cljrs sandbox env — confirm which
   math builtins exist in-interpreter vs. need adding to the allowlisted env.
-- Namespace teardown in a long-lived sandbox Repl: confirm discarded calculator
-  namespaces are actually collectable (GC is non-moving mark-and-sweep) or recycle the
-  worker after N regenerations.
+- ~~Namespace teardown in a long-lived sandbox Repl~~ — **resolved** (milestone 3): a
+  real OOM was hit in exactly this way (see the milestone-3 notes below). Rather than
+  confirm whether discarded namespaces are actually collectable, `sandbox-manager.js`
+  now recycles the worker on every install, sidestepping the question entirely.
 - Share-link format: source in URL fragment (size limits) vs. paste-only export.
 
 Open questions from milestone 3:
@@ -924,6 +925,26 @@ Open questions from milestone 3:
      value to a double (`(* x 1.0)`, plain arithmetic promotion, no cast fn assumed)
      before any `Math/round`/`Math/abs` call in `format-value`, on the theory that this
      class of bug likely affects any native math fn given a non-double number, not
-     just `finite?` specifically. **Root cause unconfirmed** -- this is the best
-     available theory given the symptom match, not a verified fix, since a wasm panic
-     can't be introspected from here the way a Clojure exception can.
+     just `finite?` specifically. **Superseded below** -- the `Math/round`/integer
+     theory turned out not to be the actual cause, though both fixes above are
+     genuine, independent improvements worth keeping (the `:select` gap was real
+     regardless, and the double-coercion is still cheap insurance).
+- **Real-world finding, actual root cause**: the "unreachable code" errors turned out
+  to be OOM aborts, not type-mismatch panics (Rust's default allocator aborts on
+  allocation failure, which traps as `unreachable` in wasm -- same error text, entirely
+  different cause). This lines up with an open question already on record (§13): the
+  sandbox worker is long-lived and every install/generation/retry for a given `calc-id`
+  reuses the *same* worker's Repl, redefining `(def installed-calc ...)` in place rather
+  than starting fresh -- and this interpreter's non-moving mark-and-sweep GC was never
+  confirmed to actually reclaim a prior calculator's closures on redefinition. A single
+  debugging session that installs dozens of generated variants in a row (exactly what
+  this milestone's back-and-forth did) accumulates memory in that one worker until the
+  wasm module's memory is exhausted. Fixed in `sandbox-manager.js`: every **install**
+  now respawns a fresh worker first, instead of reusing the current one --
+  `compute`/`logic` calls still reuse the worker as before, since they don't redefine
+  anything and don't need it. The ~50ms respawn cost (measured in §5) is paid once per
+  install, never per call, so this doesn't touch the interactive-recompute path at all.
+  This closes the "namespace teardown" open question by sidestepping it entirely rather
+  than solving it: instead of trusting the interpreter to reclaim a redefined
+  namespace's memory, every install just gets memory the OS/browser has already fully
+  reclaimed from a terminated worker.
