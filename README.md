@@ -39,10 +39,17 @@ Generation needs `proxy/server.mjs` running somewhere the browser app can reach 
 `src/host/generation-client.js` — it posts to `window.GENERATE_ENDPOINT`, defaulting to
 same-origin `/api/generate`, so deploying the proxy behind the same host/reverse-proxy
 as the static site needs no client config; deploying it elsewhere means setting that
-global before `main.js` loads):
+global before `main.js` loads). The static site's Dreamhost shared host can't run
+`server.mjs` itself (no persistent Node process / real streaming through Passenger), so
+this deploys to its own subdomain, `api.calculator.clj.rs`, on a host that can run it
+(Render, Fly.io, etc.) — `src/host/index.html` sets `window.GENERATE_ENDPOINT` to
+`https://api.calculator.clj.rs/api/generate` accordingly. Set `ALLOWED_ORIGIN` to the
+main site's origin (`https://calculator.clj.rs`) on that deployment so the proxy's CORS
+headers aren't wide open to `*`:
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
+export ALLOWED_ORIGIN=https://calculator.clj.rs
 npm run proxy:dev   # listens on :8787 by default (PORT env var)
 ```
 

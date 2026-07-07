@@ -7,6 +7,15 @@
 </head>
 <body>
   <div id="app">Loading…</div>
+  <script>
+    // The hosted-generation proxy (proxy/server.mjs) runs on its own
+    // subdomain, not this site's origin, so generation-client.js's default
+    // same-origin `/api/generate` doesn't apply here -- see doc/plan.md §8.
+    // The `||` leaves room for test/e2e/generation.mjs's page.addInitScript
+    // to point this at a local fake proxy instead -- that runs before any
+    // page script (including this one), so it wins here.
+    window.GENERATE_ENDPOINT = window.GENERATE_ENDPOINT || 'https://api.calculator.clj.rs/api/generate';
+  </script>
   <script type="module" src="./main.js"></script>
 </body>
 </html>
