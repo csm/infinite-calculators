@@ -1,33 +1,55 @@
 (ns app.render)
 
-(defn round2 [x]
-  (when x (/ (Math/round (* x 100)) 100.0)))
-
-(defn number-input [{:keys [id label value unit]}]
+(defn field-input [{:keys [id label value unit type]}]
   [:label {:class "field"}
    [:span {:class "field-label"} label]
-   [:input {:type "number"
+   [:input {:type (if (#{:number :integer} type) "number" "text")
             :value value
             :on {:input [:set-input id]}}]
    (when unit [:span {:class "field-unit"} unit])])
 
-(defn output-row [{:keys [label value unit]}]
+(defn output-row [{:keys [id label format]} outputs]
   [:div {:class "output-row"}
    [:span {:class "output-label"} label]
-   [:span {:class "output-value"} (str (round2 value) unit)]])
+   [:span {:class "output-value"} (app.contract/format-value format (get outputs id))]])
+
+(defn logic-step [step]
+  (if (:assumption step)
+    [:div {:class "logic-assumption"} "Assumes: " (:assumption step)]
+    [:div {:class "logic-step"}
+     [:span {:class "logic-step-label"} (:step step)]
+     [:span {:class "logic-step-formula"} (:formula step)]
+     [:span {:class "logic-step-value"} (str (:value step))]]))
+
+(defn logic-panel [steps]
+  [:div {:class "logic-panel"} (map logic-step steps)])
+
+(defn source-panel [{:keys [draft-source source-error]}]
+  [:div {:class "source-panel"}
+   [:textarea {:class "source-editor"
+               :value draft-source
+               :on {:input [:edit-source]}}]
+   (when source-error [:div {:class "source-error"} source-error])
+   [:div {:class "source-actions"}
+    [:button {:on {:click [:apply-source]}} "Apply"]
+    [:button {:on {:click [:revert-source]}} "Revert"]]])
 
 (defn view
-  "Pure function from app-state to hiccup. No DOM access here -- rendering and
-  event dispatch both happen outside this namespace (app.core)."
-  [{:keys [inputs outputs]}]
-  [:div {:class "calculator-card"}
-   [:h1 "Tip calculator"]
-   [:p {:class "calculator-description"}
-    "Milestone-1 walking skeleton: a hand-written calculator proving
-     boot -> eval -> render -> dispatch -> recompute, end to end."]
-   [:div {:class "inputs"}
-    (number-input {:id :bill :label "Bill amount" :value (:bill inputs) :unit "$"})
-    (number-input {:id :tip-pct :label "Tip %" :value (:tip-pct inputs) :unit "%"})]
-   [:div {:class "outputs"}
-    (output-row {:label "Tip" :value (:tip outputs) :unit "$"})
-    (output-row {:label "Total" :value (:total outputs) :unit "$"})]])
+  "Pure function from app-state to hiccup. No DOM access here -- rendering
+  and event dispatch both happen outside this namespace (app.core)."
+  [{:keys [calc]}]
+  (let [{:keys [spec inputs outputs steps status ui]} calc
+        {:keys [show-logic? show-source? draft-source source-error]} ui]
+    [:div {:class "calculator-card"}
+     [:h1 (or (:title spec) "Calculator")]
+     (when (:description spec) [:p {:class "calculator-description"} (:description spec)])
+     (when (= status :installing) [:p {:class "status-banner"} "Installing…"])
+     [:div {:class "inputs"}
+      (map (fn [in] (field-input (assoc in :value (get inputs (:id in))))) (:inputs spec))]
+     [:div {:class "outputs"}
+      (map #(output-row % outputs) (:outputs spec))]
+     [:div {:class "reveal-controls"}
+      [:button {:on {:click [:toggle-logic]}} (if show-logic? "Hide logic" "Show logic")]
+      [:button {:on {:click [:toggle-source]}} (if show-source? "Hide source" "Show source")]]
+     (when show-logic? (logic-panel steps))
+     (when show-source? (source-panel ui))]))

@@ -1,0 +1,172 @@
+(ns app.contract)
+;; The calculator contract from doc/plan.md §4: the shape generated (or
+;; pasted) code must produce, the pipeline stages that check it (§6 stages
+;; 2/4/5), and the closed set of output formatters the app -- never the model
+;; -- controls. Bundled into both the main Repl and every sandbox Repl (see
+;; build/bundle.mjs): symbol-scan and validate-spec/smoke-test run sandbox-side
+;; (where the live spec with real :compute/:logic fns exists), format-value
+;; runs main-Repl-side (where cards render).
+
+(def input-types #{:number :integer :select :checkbox :date :text})
+(def format-types #{:currency :percent :integer :decimal :duration :unit})
+
+;; Forms a generated/pasted calculator source must not contain. This is a
+;; textual pre-check (read, never eval'd) run before the source is handed to
+;; the sandbox Repl -- see doc/plan.md §5's verified finding that the
+;; interpreter's own namespace-refer restriction can't actually hide most of
+;; these at the language level, so this scan is real enforcement, not
+;; defense-in-depth theater.
+(def banned-symbols
+  '#{eval read-string load-string intern in-ns ns create-ns remove-ns
+     require import refer alias ns-unmap
+     atom swap! reset! compare-and-set! add-watch remove-watch
+     agent send send-off
+     spit slurp with-open load-file})
+
+(defn- collect-symbols [form]
+  (cond
+    (symbol? form) [form]
+    (map? form) (mapcat collect-symbols (mapcat (fn [[k v]] [k v]) form))
+    (coll? form) (mapcat collect-symbols form)
+    :else []))
+
+(defn symbol-scan
+  "Reads `source` -- which the contract requires to be exactly one
+  `(calculator {...})` form (doc/plan.md §4) -- without evaluating anything,
+  and checks it for banned symbols. Returns {:ok true :form <read form>} or
+  {:ok false :errors [{:message ...}]}."
+  [source]
+  (let [form (try (read-string source) (catch :default _ ::parse-error))]
+    (cond
+      (= form ::parse-error)
+      {:ok false :errors [{:message "could not parse source: not valid Clojure"}]}
+
+      (not (and (seq? form) (= 'calculator (first form))))
+      {:ok false :errors [{:message "source must be exactly one (calculator {...}) form"}]}
+
+      :else
+      (let [found (distinct (filter banned-symbols (collect-symbols form)))]
+        (if (empty? found)
+          {:ok true :form form}
+          {:ok false
+           :errors (mapv (fn [s] {:message (str "form not allowed in a calculator: " s)}) found)})))))
+
+(defn- valid-input? [{:keys [id label type]}]
+  (and (keyword? id) (string? label) (contains? input-types type)))
+
+(defn- valid-output? [{:keys [id label format]}]
+  (and (keyword? id) (string? label) (vector? format) (contains? format-types (first format))))
+
+(defn- ids-of [xs]
+  (if (vector? xs) (map :id xs) []))
+
+(defn validate-spec
+  "Validates the shape of an evaluated (calculator {...}) result against the
+  §4 contract. Returns {:ok true} or {:ok false :errors [...]}."
+  [{:keys [title inputs outputs compute logic]}]
+  (let [input-ids (ids-of inputs)
+        output-ids (ids-of outputs)
+        checks
+        [(when-not (string? title) {:message "calculator needs a :title string"})
+         (when-not (and (vector? inputs) (seq inputs)) {:message ":inputs must be a non-empty vector"})
+         (when-not (and (vector? outputs) (seq outputs)) {:message ":outputs must be a non-empty vector"})
+         (when-not (fn? compute) {:message ":compute must be a function"})
+         (when-not (fn? logic) {:message ":logic must be a function"})
+         (when (and (vector? inputs) (not (every? valid-input? inputs)))
+           {:message "each input needs :id (keyword), :label (string), :type (one of #{:number :integer :select :checkbox :date :text})"})
+         (when (and (vector? outputs) (not (every? valid-output? outputs)))
+           {:message "each output needs :id (keyword), :label (string), :format (a vector starting with one of #{:currency :percent :integer :decimal :duration :unit})"})
+         (when (not= (count (distinct input-ids)) (count input-ids)) {:message "duplicate :id among inputs"})
+         (when (not= (count (distinct output-ids)) (count output-ids)) {:message "duplicate :id among outputs"})]
+        errors (vec (remove nil? checks))]
+    (if (empty? errors) {:ok true} {:ok false :errors errors})))
+
+(defn defaults
+  "The default-inputs map a calculator's :compute/:logic are smoke-tested and
+  first rendered against."
+  [inputs]
+  (into {} (map (fn [{:keys [id default]}] [id default]) inputs)))
+
+(defn smoke-test
+  "Runs :compute then :logic on the declared defaults (doc/plan.md §6 stage
+  5). Must only be called after validate-spec has passed. Returns
+  {:ok true :outputs {...} :steps [...]} or {:ok false :errors [...]}."
+  [{:keys [inputs outputs compute logic]}]
+  (let [in (defaults inputs)
+        computed (try {:value (compute in)} (catch :default e {:error e}))]
+    (cond
+      (:error computed)
+      {:ok false :errors [{:message (str ":compute threw on default inputs: " (ex-message (:error computed)))}]}
+
+      (not (map? (:value computed)))
+      {:ok false :errors [{:message ":compute must return a map"}]}
+
+      :else
+      (let [out (:value computed)
+            output-ids (set (map :id outputs))
+            missing (remove #(contains? out %) output-ids)
+            numeric-formats #{:currency :percent :integer :decimal}
+            bad-numeric (->> outputs
+                              (filter #(numeric-formats (first (:format %))))
+                              (map :id)
+                              (remove #(let [v (get out %)] (and (number? v) (finite? v)))))]
+        (cond
+          (seq missing)
+          {:ok false :errors [{:message (str ":compute result missing outputs: " (vec missing))}]}
+
+          (seq bad-numeric)
+          {:ok false :errors [{:message (str ":compute did not return a finite number for: " (vec bad-numeric))}]}
+
+          :else
+          (let [logic-result (try {:value (logic in out)} (catch :default e {:error e}))]
+            (cond
+              (:error logic-result)
+              {:ok false :errors [{:message (str ":logic threw on default inputs: " (ex-message (:error logic-result)))}]}
+
+              (not (vector? (:value logic-result)))
+              {:ok false :errors [{:message ":logic must return a vector of steps"}]}
+
+              :else
+              {:ok true :outputs out :steps (:value logic-result)})))))))
+
+(defn- round-to [n x]
+  (let [scale (Math/pow 10 n)]
+    (/ (Math/round (* x scale)) scale)))
+
+(defn- pad2 [n]
+  (if (< n 10) (str "0" n) (str n)))
+
+(defn- currency-symbol [code]
+  (case code "USD" "$" "EUR" "€" "GBP" "£" (str code " ")))
+
+(defn- format-currency [code value]
+  (let [negative (neg? value)
+        v (Math/abs value)
+        cents (Math/round (* v 100))
+        dollars (quot cents 100)
+        rem-cents (mod cents 100)]
+    (str (when negative "-") (currency-symbol code) dollars "." (pad2 rem-cents))))
+
+(defn- format-duration [seconds]
+  (let [total (Math/round seconds)
+        h (quot total 3600)
+        m (quot (mod total 3600) 60)
+        s (mod total 60)]
+    (cond
+      (pos? h) (str h "h " m "m")
+      (pos? m) (str m "m " s "s")
+      :else (str s "s"))))
+
+(defn format-value
+  "Renders a computed output value as a string per its declared :format --
+  the closed set of formatters the app owns (doc/plan.md §4), never the
+  model. `format` is a vector like [:currency \"USD\"] or [:unit \"lbs\"]."
+  [[kind & args] value]
+  (case kind
+    :currency (format-currency (or (first args) "USD") value)
+    :percent (str (round-to 1 value) "%")
+    :integer (str (Math/round value))
+    :decimal (str (round-to 2 value))
+    :duration (format-duration value)
+    :unit (str (round-to 2 value) (when-let [u (first args)] (str " " u)))
+    (str value)))

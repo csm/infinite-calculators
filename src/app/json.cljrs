@@ -1,0 +1,47 @@
+(ns app.json (:require [clojure.string :as str]))
+;; Minimal data->JSON string encoder. cljrs-wasm's Repl.eval returns only a
+;; stringified result (doc/plan.md §7 -- no structured JS value marshalling
+;; exists yet), so every value that needs to leave a Repl for JS crosses as
+;; text. JSON rather than pr-str because the JS side needs to read it back
+;; with the platform's own JSON.parse, no custom reader required. Handles
+;; exactly the shapes calculator specs/outputs/logic-steps are made of: nil,
+;; booleans, numbers, strings, keywords (as their name), maps, and vectors.
+
+(defn- escape [s]
+  (-> s
+      (str/replace "\\" "\\\\")
+      (str/replace "\"" "\\\"")
+      (str/replace "\n" "\\n")))
+
+(defn- quoted [s]
+  (str "\"" (escape s) "\""))
+
+(defn- key->json [k]
+  (cond
+    (keyword? k) (quoted (name k))
+    (string? k) (quoted k)
+    :else (quoted (str k))))
+
+;; JSON has no keyword type. A keyword *value* (not a map key -- map keys are
+;; always assumed keyword-ish on the way back, see edn.js) is marked by
+;; prefixing its name with this sentinel, which the closed sets of keywords
+;; that actually cross this boundary (contract :type/:format tags, :id
+;; keywords) never start with; src/host/edn.js strips it and emits a bare
+;; keyword literal instead of a quoted string when reconstructing Clojure
+;; source from JSON. Plain ASCII, not a control character: a raw control byte
+;; embedded in a string is illegal JSON and V8's JSON.parse rejects it
+;; (verified -- an earlier \\u0001-based marker broke exactly this way).
+(def keyword-marker "~kw~")
+
+(defn ->json [v]
+  (cond
+    (nil? v) "null"
+    (true? v) "true"
+    (false? v) "false"
+    (number? v) (str v)
+    (keyword? v) (quoted (str keyword-marker (name v)))
+    (string? v) (quoted v)
+    (map? v) (str "{" (str/join "," (map (fn [[k val]] (str (key->json k) ":" (->json val))) v)) "}")
+    (vector? v) (str "[" (str/join "," (map ->json v)) "]")
+    (seq? v) (str "[" (str/join "," (map ->json v)) "]")
+    :else (quoted (str v))))
