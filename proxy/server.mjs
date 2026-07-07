@@ -28,7 +28,11 @@ const RATE_LIMIT_MAX = 20;
 // just changing GENERATION_PROVIDER + that provider's key, no code change.
 const PROVIDERS = {
   anthropic: { module: './providers/anthropic.mjs', apiKey: process.env.ANTHROPIC_API_KEY, defaultModel: 'claude-sonnet-5' },
-  together: { module: './providers/together.mjs', apiKey: process.env.TOGETHER_API_KEY, defaultModel: 'meta-llama/Llama-3.3-70B-Instruct-Turbo' },
+  // Real-world finding: general instruction-tuned models were imprecise
+  // about which closing bracket *type* (not count) ends a long run of
+  // nested closers at the end of a calculator form -- a code-specialized
+  // model is a better fit for this exact-bracket-matching-heavy task.
+  together: { module: './providers/together.mjs', apiKey: process.env.TOGETHER_API_KEY, defaultModel: 'Qwen/Qwen2.5-Coder-32B-Instruct' },
   fake: { module: './providers/fake.mjs', apiKey: null, defaultModel: null },
 };
 const providerName = process.env.GENERATION_PROVIDER || 'anthropic';
