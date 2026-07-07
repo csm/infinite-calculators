@@ -732,21 +732,36 @@ Open questions to resolve during milestones 1–2:
 
 Open questions from milestone 3:
 
-- **Unverified this session**: the sandboxed environment milestone 3 was built in had no
-  network path to `crates.io`'s download CDN (only its index resolved), so
-  `wasm-pack build` couldn't run and `npm run test:e2e` (including the new
-  `test/e2e/generation.mjs`) has not actually executed against this code. Run it in an
-  environment that can build `wasm-shell` before merging/deploying.
+- ~~Unverified this session~~ — **resolved**: a follow-up CI workflow
+  (`.github/workflows/test.yml`, GitHub-hosted runner with real network access) built
+  `wasm-shell` and ran `npm run test:e2e` (including `test/e2e/generation.mjs`) against
+  this code; it passed.
+- **Real-world finding, unconfirmed root cause**: after deploying, interacting with the
+  page on an up-to-date mobile Safari/iOS (specifically typing into an input) reliably
+  crashed the tab ("A Problem Repeatedly Occurred"). Leading theory: `src/host/main.js`'s
+  effect-poll loop called `repl.eval()` on the main Repl every `requestAnimationFrame`
+  (60Hz) unconditionally, even at idle, since milestone 1; every keystroke also invokes
+  the main Repl via a *native* callback path (`cljrs.dom/listen!` → `dispatch!` →
+  `render!`, §3) on the same Repl instance. iOS Safari's per-tab CPU/memory watchdog is
+  known to be much stricter than desktop Chromium (the only browser this project has
+  been tested against so far -- cross-browser/mobile testing is still unstarted
+  milestone-6 hardening). Mitigation shipped: the poll loop now runs on a 100ms
+  `setTimeout` instead of every animation frame (§7's poll latency was already bounded
+  by worker round-trips of tens of ms to seconds, so this adds no perceptible delay) --
+  **not yet re-verified on the actual device that hit the crash**. This doesn't resolve
+  the more fundamental open question below, it just makes whatever's causing it much
+  less frequent by cutting background Repl calls roughly 6x.
 - The main Repl's native DOM-event callback path (`cljrs.dom/listen!` → `dispatch!`,
   §3) and JS-initiated `repl.eval()` calls (the effect-result poll loop, §7) both touch
   the same Repl instance; §5's "a single Repl instance isn't safe to call `.eval()`
-  concurrently" finding was verified for the sandbox worker specifically. Generation
-  streaming now holds a `repl.eval()` call outstanding for a JS-network-round-trip
-  duration (seconds, not the sub-millisecond window install/compute/logic calls used
-  to hold it for) on the *main* Repl, widening whatever window this hazard has. Worth a
-  dedicated verification pass (fire input events against the main Repl while a
-  generation is streaming) before relying on it under real user load.
+  concurrently" finding was verified for the sandbox worker specifically, not the main
+  Repl. Generation streaming holds a `repl.eval()` call outstanding for a JS-network-
+  round-trip duration (seconds) on the *main* Repl, widening whatever window this
+  hazard has. Worth a dedicated verification pass (fire input events against the main
+  Repl while a generation is streaming, ideally on the iOS Safari build that crashed)
+  before relying on the mitigation above as a real fix rather than a probability
+  reduction.
 - No real hosted-model API key has been exercised against `proxy/providers/anthropic.mjs`
-  in this session; the few-shot examples in `prompts/examples.json` are believed to stay
-  within the §4 dialect subset but haven't been eval'd against the pinned cljrs-wasm
-  version the way the golden-calculator suite pins hand-written ones.
+  or `proxy/providers/together.mjs` yet; the few-shot examples in `prompts/examples.json`
+  are believed to stay within the §4 dialect subset but haven't been eval'd against the
+  pinned cljrs-wasm version the way the golden-calculator suite pins hand-written ones.

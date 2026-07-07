@@ -96,6 +96,16 @@ async function main() {
 
   window.__repl = repl; // dev/debugging convenience only
 
+  // Polls at a fixed cadence rather than every animation frame (60Hz):
+  // effects (sandbox install/compute/logic/generate round trips) already
+  // take tens of ms to seconds, so 100ms of added latency here is
+  // imperceptible, and a constant 60Hz eval() call into the interpreter --
+  // even when idle -- is real sustained CPU/memory pressure that mobile
+  // Safari's per-tab resource watchdog has been observed to crash-loop over
+  // ("A Problem Repeatedly Occurred") once real typing/dispatch! activity
+  // on the same Repl instance is layered on top of it.
+  const POLL_INTERVAL_MS = 100;
+
   async function tick() {
     try {
       const r = await repl.eval('(app.core/take-effects!)');
@@ -116,9 +126,9 @@ async function main() {
     } catch (err) {
       console.error('effect tick failed', err);
     }
-    requestAnimationFrame(tick);
+    setTimeout(tick, POLL_INTERVAL_MS);
   }
-  requestAnimationFrame(tick);
+  setTimeout(tick, POLL_INTERVAL_MS);
 }
 
 main();

@@ -138,7 +138,12 @@ every push to `main` (or manually via workflow_dispatch). It stages only the
 runtime-required files — `dist/`, `build/wasm-shell/pkg/`, `src/host/` — into `deploy/`
 (`npm run prepare-deploy`; see `build/prepare-deploy.mjs`), plus a generated `index.html`
 that redirects the site root to `/src/host/index.html` (the app's real entry point,
-whose relative script/style tags mean it has to be served from that path).
+whose relative script/style tags mean it has to be served from that path), plus a
+`.htaccess` (`build/deploy.htaccess`) that forces revalidation on every `.html`/`.js`/
+`.cljrs`/`.css`/`.wasm` request — the app fetches its own bundles with no cache-busting
+query string, so without this a returning visitor's browser can keep serving an old
+bundle indefinitely past a deploy (needs `mod_headers` on the SFTP host; Dreamhost shared
+hosting has it enabled by default).
 
 Add these repo secrets (Settings → Secrets and variables → Actions) for the workflow to
 authenticate:

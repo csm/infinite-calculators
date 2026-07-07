@@ -1,0 +1,16 @@
+# Deployed to deploy/.htaccess (see build/prepare-deploy.mjs), applying to
+# every runtime-required file (dist/, build/wasm-shell/pkg/, src/host/).
+#
+# The app fetches its own source at runtime with no cache-busting (main.js
+# does `fetch('/dist/bundle.cljrs')` with no version query string, same for
+# sandbox-worker.js's sandbox-bundle.cljrs, and the .js/.wasm files load as
+# plain script/module tags) -- a returning visitor's cached copy can end up
+# running an old bundle indefinitely. Forcing revalidation on every request
+# is cheap (a 304 on an unchanged file) and means a deploy always takes
+# effect on next load instead of waiting out however long the browser's
+# heuristic cache would otherwise have kept the old files.
+<IfModule mod_headers.c>
+  <FilesMatch "\.(html|js|mjs|cljrs|css|wasm)$">
+    Header set Cache-Control "no-cache, must-revalidate"
+  </FilesMatch>
+</IfModule>
