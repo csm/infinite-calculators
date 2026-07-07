@@ -74,7 +74,7 @@ try {
   assertIncludes(initialOutputs, '$9.00', 'initial tip (bill=50, 18%) is $9.00');
   assertIncludes(initialOutputs, '$59.00', 'initial total is $59.00');
 
-  const inputs = await page.$$('.field input');
+  const inputs = await page.$$('.calculator-card .field input');
   assertEqual(inputs.length, 2, 'two number inputs rendered');
 
   await inputs[0].fill('100');
