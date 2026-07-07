@@ -821,4 +821,26 @@ Open questions from milestone 3:
   max_tokens error), including on the no-prior-source repair path (a gap found while
   fixing this: a repair attempt following a `generate-error`, as opposed to a failed
   `install`, had no source to show back and was silently retrying with zero context
-  about what went wrong). **Not yet re-verified against the actual failing prompt.**
+  about what went wrong).
+- **Real-world finding**: retested after the truncation fix -- still failed after 3
+  attempts, but with a different, raw error this time: `Read error: read error:
+  unexpected closing delimiter`, not the friendly "not valid Clojure"/"exactly one
+  form" messages `app.contract/symbol-scan` is supposed to produce. Root cause: a real
+  validation gap in `symbol-scan` itself, not a generation-quality problem. It called
+  plain `(read-string source)`, which only reads the *first* form in a string and
+  silently ignores everything after it -- so a source consisting of a valid
+  `(calculator {...})` form followed by stray trailing content (leftover garbage from
+  a truncated/malformed generation, an accidental extra form, ...) passed `symbol-scan`
+  as `:ok true`. That garbage then got spliced verbatim into
+  `(def installed-calc <source>)` by the sandbox worker's real install step
+  (`sandbox-worker.js`) -- and *that* wrapping form is what broke, surfacing the
+  interpreter's raw reader error instead of a validation message, and (worse) with no
+  useful error text to feed back into a repair attempt. Fixed by rewriting
+  `symbol-scan` to read `source` wrapped in `[...]` instead of bare -- forcing the
+  reader to consume the entire string as however many top-level forms it contains, so
+  trailing garbage now shows up as "more than one form" (or a read error) at this
+  friendly validation step instead of at eval time. `proxy/prompts.mjs`'s
+  `truncationHint` was broadened to also fire on that "exactly one form" message.
+  **Not yet re-verified against the actual failing prompt** (true of both findings
+  above -- the mortgage prompt has now failed differently twice in a row rather than
+  successfully installing).

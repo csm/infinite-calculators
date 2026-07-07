@@ -34,22 +34,46 @@
   "Reads `source` -- which the contract requires to be exactly one
   `(calculator {...})` form (doc/plan.md §4) -- without evaluating anything,
   and checks it for banned symbols. Returns {:ok true :form <read form>} or
-  {:ok false :errors [{:message ...}]}."
+  {:ok false :errors [{:message ...}]}.
+
+  Reads `source` wrapped in `[...]` rather than calling `read-string` on it
+  directly: plain `read-string` only reads the *first* form and silently
+  ignores anything after it, so a source with a valid `(calculator {...})`
+  followed by stray trailing content (garbage from a truncated/malformed
+  generation, an accidental second form, ...) would pass this check --
+  and then blow up later with a raw, unfriendly interpreter reader error
+  when the worker host splices it into `(def installed-calc <source>)`
+  (verified as a real generation failure mode: doc/plan.md's milestone-3
+  notes). Wrapping in a vector literal forces the reader to consume the
+  *entire* string as however many top-level forms it contains, so trailing
+  garbage that isn't just whitespace/comments shows up as more than one
+  element -- or as a read error here instead of at eval time -- either way
+  caught as our own friendly validation error before anything is trusted."
   [source]
-  (let [form (try (read-string source) (catch :default _ ::parse-error))]
+  ;; A newline before the closing bracket, not just "[" source "]" -- if
+  ;; source's last line is itself a `;;` comment with no trailing newline,
+  ;; a bracket appended directly onto it would be swallowed into that
+  ;; comment (comments run to end-of-line) and falsely look unbalanced.
+  (let [wrapped (try (read-string (str "[" source "\n]")) (catch :default _ ::parse-error))]
     (cond
-      (= form ::parse-error)
+      (= wrapped ::parse-error)
       {:ok false :errors [{:message "could not parse source: not valid Clojure"}]}
 
-      (not (and (seq? form) (= 'calculator (first form))))
+      (not= 1 (count wrapped))
       {:ok false :errors [{:message "source must be exactly one (calculator {...}) form"}]}
 
       :else
-      (let [found (distinct (filter banned-symbols (collect-symbols form)))]
-        (if (empty? found)
-          {:ok true :form form}
-          {:ok false
-           :errors (mapv (fn [s] {:message (str "form not allowed in a calculator: " s)}) found)})))))
+      (let [form (first wrapped)]
+        (cond
+          (not (and (seq? form) (= 'calculator (first form))))
+          {:ok false :errors [{:message "source must be exactly one (calculator {...}) form"}]}
+
+          :else
+          (let [found (distinct (filter banned-symbols (collect-symbols form)))]
+            (if (empty? found)
+              {:ok true :form form}
+              {:ok false
+               :errors (mapv (fn [s] {:message (str "form not allowed in a calculator: " s)}) found)})))))))
 
 (defn- valid-input? [{:keys [id label type]}]
   (and (keyword? id) (string? label) (contains? input-types type)))

@@ -23,10 +23,12 @@ function fence(source) {
 // repair turn costs nothing if the guess is wrong (the advice -- be
 // concise, skip prose -- is harmless for any other kind of failure too).
 function truncationHint(priorError) {
-  return /cut off|max_tokens|not valid clojure/i.test(priorError || '')
-    ? 'Your response may have been cut off before it finished, or is otherwise malformed. ' +
-        'Respond with only the fenced code block (no explanation before or after it) and keep ' +
-        'comments minimal, so the complete form fits well within the response budget.\n\n'
+  return /cut off|max_tokens|not valid clojure|exactly one/i.test(priorError || '')
+    ? 'Your response may have been cut off before it finished, included stray content after ' +
+        'the form, or is otherwise malformed. Respond with only the fenced code block -- no ' +
+        'explanation before or after it, and nothing following the closing paren of the ' +
+        '(calculator {...}) form -- and keep comments minimal, so the complete form fits well ' +
+        'within the response budget.\n\n'
     : '';
 }
 
