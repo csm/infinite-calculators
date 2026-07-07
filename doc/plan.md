@@ -547,10 +547,16 @@ storage eviction), offer one-click switch to hosted rather than failing the gene
   render.cljrs                views (hiccup): calculator card, logic/source panels
   core.cljrs                  entry, state atom, dispatch!, :effects queue drained by
                               the JS host's poll loop (§7), handle-effect-result!
-  genpipe.cljrs               generation orchestration, prompts, repair loop (not built
-                              yet -- milestone 3)
-  backend.cljrs               ModelBackend protocol + webllm/hosted impls (not built
-                              yet -- milestone 3/4)
+  genpipe.cljrs               generation pipeline's pure helpers (§6): source
+                              extraction from a raw model response, attempt-limit
+                              tracking; the :generation state machine and effect/
+                              handle-effect-result! wiring itself lives in core.cljrs,
+                              same pattern as :calc's install/compute/logic (milestone 3)
+  backend.cljrs               ModelBackend protocol + webllm/hosted impls -- not built
+                              yet; milestone 3 wired hosted generation directly through
+                              the :generate effect/proxy instead (§7/§8), deferring the
+                              protocol abstraction to milestone 4 when webllm needs to
+                              implement the same shape
   storage.cljrs               localStorage persistence, share links (not built yet --
                               milestone 5)
 /src/sandbox/                 sources eval'd into each calculator's own sandbox Repl
@@ -566,21 +572,35 @@ storage eviction), offer one-click switch to hosted rather than failing the gene
                               the sandbox worker script (sandbox-worker.js) and the
                               main-thread manager that owns one per calculator with the
                               watchdog deadline (sandbox-manager.js), the data<->Clojure
-                              source codec (edn.js, §7's counterpart to app.json) --
-                              webllm glue/editor mount not built yet (milestone 3/4/5)
+                              source codec (edn.js, §7's counterpart to app.json),
+                              generation-client.js (streams a generation from the proxy
+                              and parses its SSE response -- milestone 3; JS-only per
+                              §7) -- webllm glue/editor mount not built yet (milestone 4/5)
 /build/wasm-shell/            thin Rust crate (`cljrs-wasm` dependency, pinned version)
                               wasm-pack'd to produce the Repl bindings; the *same* pkg
                               is used to boot both the main Repl and every sandbox
                               worker's Repl (just two separate `new Repl()` calls into
                               the same wasm module); see §0 for the `wasm-opt = false`
                               build note
-/proxy/                       hosted-model API proxy (serverless function)
-/prompts/                     system prompt + few-shot examples (data, versioned)
-/test/e2e/                    Playwright end-to-end tests (real browser, real wasm, no
-                              mocks): walking-skeleton.mjs (boot/render/recompute
-                              through the sandbox), source-editing.mjs (logic panel +
-                              apply/revert), watchdog.mjs (a hung :compute trips the
-                              deadline and the calculator keeps working after)
+/proxy/                       hosted-model API proxy (milestone 3): server.mjs (a small
+                              Node HTTP server -- not yet deployed to any specific
+                              serverless platform, see doc/plan.md §12's milestone 3
+                              note), prompts.mjs (assembles system+few-shot+user/repair
+                              messages from /prompts/, §13's "no system-prompt
+                              override"), providers/anthropic.mjs (the real provider)
+                              and providers/fake.mjs (scripted, used only by
+                              test/e2e/generation.mjs -- no API key/network in CI)
+/prompts/                     system prompt (system.md) + few-shot examples
+                              (examples.json), versioned data the proxy assembles
+                              server-side; never sent by or editable from the client
+/test/e2e/                    Playwright end-to-end tests (real browser, real wasm; no
+                              mocks except the LLM itself, see /proxy/ above):
+                              walking-skeleton.mjs (boot/render/recompute through the
+                              sandbox), source-editing.mjs (logic panel + apply/revert),
+                              watchdog.mjs (a hung :compute trips the deadline and the
+                              calculator keeps working after), generation.mjs (describe
+                              -> stream -> install, first-attempt success, repair-loop
+                              recovery, and giving up after exhausting retries)
 /build/                       build/bundle.mjs concatenates two separate bundles into
                               `dist/`: `bundle.cljrs` (vendored replicant + app, for the
                               main Repl) and `sandbox-bundle.cljrs` (json + contract +
@@ -650,8 +670,27 @@ sibling namespaces already brought into existence earlier in the same bundle, ne
    multi-calculator library — the `:calculators` map from §3 and a home screen are
    still just a shape, not wired up, since there's no generation yet to populate more
    than one. *The app is now fully useful with pasted code.*
-3. **Hosted generation** — proxy function, streaming, full pipeline with repair loop;
-   logic panel. *First end-to-end "describe → calculator" moment.*
+3. **Hosted generation** — ✅ built this session, **not yet verified in a real browser**
+   (this session's sandbox had no network path to build `wasm-shell` — see the note
+   below — so `npm run test:e2e` has not actually been run against this code; treat it
+   as needing that verification pass before merge). Scope built: `proxy/` (a small
+   Node HTTP server, provider-agnostic — `proxy/providers/anthropic.mjs` is the real
+   one, `proxy/providers/fake.mjs` a scripted stand-in used only by the e2e test) that
+   holds the API key, assembles the system prompt + few-shot examples from `/prompts/`
+   plus the user's description (or, on a repair attempt, the failing source and error),
+   and passes the model's token stream through as a small normalized SSE format;
+   `src/host/generation-client.js` (SSE parsing, JS-only per §7) and a `:generate`
+   effect case in `main.js` that reports partial text and a final result back into the
+   Repl over several `handle-effect-result!` calls instead of runEffect's usual single
+   awaited outcome; `src/app/genpipe.cljrs` (pure text-extraction/attempt-tracking
+   helpers) plus new `:generation` state and dispatch/`handle-effect-result!` cases in
+   `app.core` that drive describe → stream → extract → symbol-scan → (reusing the
+   existing sandbox `:install` effect) → repair-on-failure (two retries, §6) → give up
+   with a friendly error, all wired into a new generation panel in `app.render`. *First
+   end-to-end "describe → calculator" moment* — pending the verification pass above.
+   `test/e2e/generation.mjs` exercises the real proxy, real streaming parse, and real
+   sandbox install/validate/smoke-test against the fake provider (success on the first
+   attempt, recovery via one repair attempt, and giving up after exhausting retries).
 4. **WebLLM backend** — model download UX, backend picker, eval suite to pick the
    default model, tune prompts/repair for the small model.
 5. **Polish** — CodeMirror editor, library/persistence, share links, refine prompts,
@@ -689,3 +728,24 @@ Open questions to resolve during milestones 1–2:
   namespaces are actually collectable (GC is non-moving mark-and-sweep) or recycle the
   worker after N regenerations.
 - Share-link format: source in URL fragment (size limits) vs. paste-only export.
+
+Open questions from milestone 3:
+
+- **Unverified this session**: the sandboxed environment milestone 3 was built in had no
+  network path to `crates.io`'s download CDN (only its index resolved), so
+  `wasm-pack build` couldn't run and `npm run test:e2e` (including the new
+  `test/e2e/generation.mjs`) has not actually executed against this code. Run it in an
+  environment that can build `wasm-shell` before merging/deploying.
+- The main Repl's native DOM-event callback path (`cljrs.dom/listen!` → `dispatch!`,
+  §3) and JS-initiated `repl.eval()` calls (the effect-result poll loop, §7) both touch
+  the same Repl instance; §5's "a single Repl instance isn't safe to call `.eval()`
+  concurrently" finding was verified for the sandbox worker specifically. Generation
+  streaming now holds a `repl.eval()` call outstanding for a JS-network-round-trip
+  duration (seconds, not the sub-millisecond window install/compute/logic calls used
+  to hold it for) on the *main* Repl, widening whatever window this hazard has. Worth a
+  dedicated verification pass (fire input events against the main Repl while a
+  generation is streaming) before relying on it under real user load.
+- No real hosted-model API key has been exercised against `proxy/providers/anthropic.mjs`
+  in this session; the few-shot examples in `prompts/examples.json` are believed to stay
+  within the §4 dialect subset but haven't been eval'd against the pinned cljrs-wasm
+  version the way the golden-calculator suite pins hand-written ones.

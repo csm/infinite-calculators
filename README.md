@@ -4,14 +4,20 @@ On-demand calculators generated from a natural-language description, running ent
 in the browser on **Clojurust** via **cljrs-wasm**. See [`doc/plan.md`](doc/plan.md) for
 the full design.
 
-This is milestone 2 (**sandbox + contract**): a calculator's `:compute`/`:logic` run in
-a dedicated Web Worker, one per calculator, each hosting its own cljrs-wasm Repl. The
-worker's install path runs the calculator contract's validator, symbol scan, and smoke
-test before anything is trusted; a watchdog deadline kills and respawns a worker that
-hangs. The demo calculator (tip splitting) is installed through this real pipeline
-rather than computed in the main Repl, and its source can be edited live (textarea,
-Apply/Revert) through the same pipeline pasted/generated code will use once generation
-exists (milestone 3). There's still no LLM — that's next.
+This is milestone 3 (**hosted generation**): describing a calculator in plain English
+streams a generation from a hosted LLM through a small proxy, extracts and symbol-scans
+the resulting source, and installs it through the same sandbox pipeline milestone 2
+built (eval → validate → smoke test). A failed attempt is repaired automatically (the
+specific validator/smoke-test error is fed back to the model, up to two retries) before
+giving up with a friendly error — the calculator that was already running is never
+disturbed by a failed generation. Milestone 2's textarea source editor still works the
+same way on whatever gets installed, generated or hand-written.
+
+**Not yet run end-to-end in this repo's CI/dev environment**: building `wasm-shell`
+needs a network path to crates.io's download CDN that this session's sandbox didn't
+have, so `npm run test:e2e` (including the new `test/e2e/generation.mjs`) hasn't
+actually executed against this milestone's code yet. See doc/plan.md §13's "milestone
+3" open questions before treating it as verified.
 
 ## Setup
 
@@ -26,6 +32,25 @@ npm run dev     # serves the repo root; open /src/host/index.html
 `npm run build:wasm` disables `wasm-opt` (see `build/wasm-shell/Cargo.toml`) because
 some sandboxed environments can't reach the binaryen release download it needs; drop
 that line for a real production build, or run `wasm-opt` as a separate step.
+
+### Hosted generation proxy
+
+Generation needs `proxy/server.mjs` running somewhere the browser app can reach (see
+`src/host/generation-client.js` — it posts to `window.GENERATE_ENDPOINT`, defaulting to
+same-origin `/api/generate`, so deploying the proxy behind the same host/reverse-proxy
+as the static site needs no client config; deploying it elsewhere means setting that
+global before `main.js` loads):
+
+```sh
+export ANTHROPIC_API_KEY=sk-ant-...
+npm run proxy:dev   # listens on :8787 by default (PORT env var)
+```
+
+`proxy/prompts.mjs` assembles the system prompt and few-shot examples from `/prompts/`
+server-side — the client never sends or overrides them (doc/plan.md §13). The proxy is
+provider-agnostic (`proxy/providers/anthropic.mjs`); swapping providers means adding
+another module with the same `streamCompletion({apiKey, model, system, messages})`
+async-generator shape and pointing `GENERATION_PROVIDER` at it.
 
 ## Layout
 
@@ -42,14 +67,24 @@ that line for a real production build, or run `wasm-opt` as a separate step.
   `:require`.
 - `src/app/` — the trusted app, in Clojurust, eval'd into the main Repl at boot.
   `json.cljrs`/`contract.cljrs` are shared with the sandbox bundle (see above).
+  `genpipe.cljrs` is the generation pipeline's pure text-extraction/attempt-tracking
+  helpers; the state machine itself lives in `core.cljrs`'s `:generation` key and
+  `handle-effect-result!` cases.
 - `src/sandbox/` — code eval'd into each calculator's own sandbox Repl: the
   `calculator` constructor and the install/compute/logic op handlers a worker calls.
 - `src/host/` — the JS shell. `main.js` boots the main Repl and runs the effect poll
   loop (Clojure can't call back into JS on its own, see `doc/plan.md` §7);
   `sandbox-worker.js` is what runs inside each calculator's Worker;
   `sandbox-manager.js` owns those workers from the main thread and enforces the
-  watchdog deadline; `edn.js` is the data⇄Clojure-source codec for the JS side of that
-  boundary (`app.json` is the Clojure side).
+  watchdog deadline; `generation-client.js` streams a generation from the proxy and
+  parses its SSE response; `edn.js` is the data⇄Clojure-source codec for the JS side
+  of the sandbox/JSON boundary (`app.json` is the Clojure side).
+- `prompts/` — the versioned system prompt (`system.md`) and few-shot examples
+  (`examples.json`) the proxy assembles into the model request. Never sent by or
+  editable from the client.
+- `proxy/` — the hosted-generation proxy (`server.mjs`), prompt assembly
+  (`prompts.mjs`), and provider implementations (`providers/anthropic.mjs` real,
+  `providers/fake.mjs` for the e2e test).
 
 ## Testing
 
@@ -58,8 +93,10 @@ npm run build
 npm run test:e2e
 ```
 
-Runs three real Chromium sessions (Playwright) against the built app, no mocks — same
-code paths a user hits:
+Runs four real Chromium sessions (Playwright) against the built app — same code paths
+a user hits, no mocks except the LLM itself (there's no real API key or model access in
+CI, so `generation.mjs` runs the real proxy against a scripted fake provider instead;
+see `proxy/providers/fake.mjs`):
 
 - `test/e2e/walking-skeleton.mjs` — boot, install the demo calculator through the real
   sandbox worker, change an input, assert the output recomputes correctly.
@@ -70,6 +107,11 @@ code paths a user hits:
 - `test/e2e/watchdog.mjs` — a calculator whose `:compute` hangs for certain inputs trips
   the deadline, its worker gets killed and replaced, and the calculator keeps working
   afterwards.
+- `test/e2e/generation.mjs` — a description streams through the real proxy and installs
+  through the real sandbox pipeline on the first attempt; a scripted bad first attempt
+  is repaired automatically and still ends up installed; a scripted always-bad attempt
+  exhausts its retries and surfaces a friendly error without disturbing the calculator
+  already running.
 
 ## Deployment
 

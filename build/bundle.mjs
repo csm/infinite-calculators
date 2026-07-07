@@ -15,7 +15,7 @@ const REPLICANT_ORDER = [
 ].map((f) => join(root, 'vendor/replicant', `${f}.cljc`));
 
 const APP_ORDER = [
-  'json', 'contract', 'render', 'core',
+  'json', 'contract', 'render', 'genpipe', 'core',
 ].map((f) => join(root, 'src/app', `${f}.cljrs`));
 
 // The sandbox bundle (evaluated into each per-calculator worker's own Repl,

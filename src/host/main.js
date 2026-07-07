@@ -6,7 +6,45 @@
 // pending effects rather than being handed them.
 import init, { Repl } from '/build/wasm-shell/pkg/infinite_calculators_wasm_shell.js';
 import { sandbox } from './sandbox-manager.js';
+import { streamGenerate } from './generation-client.js';
 import { toEdn, unwrapClojureString } from './edn.js';
+
+async function reportEffectResult(repl, payload) {
+  const call = `(app.core/handle-effect-result! ${toEdn(payload)})`;
+  const r = await repl.eval(call);
+  if (r.is_error) console.error('handle-effect-result! failed', r.result, call);
+}
+
+// The "generate" effect (doc/plan.md §6/§8) is the one effect that reports
+// back more than once -- partial text as it streams, then a final done/
+// error -- instead of a single awaited outcome like install/compute/logic
+// below, so it can't go through the generic runEffect/single-report path.
+async function runGenerateEffect(repl, effect) {
+  const requestId = effect['request-id'];
+  try {
+    const result = await streamGenerate(
+      {
+        description: effect.description,
+        attempt: effect.attempt,
+        priorSource: effect['prior-source'],
+        priorError: effect['prior-error'],
+      },
+      (partialText) =>
+        reportEffectResult(repl, { kind: 'generate-token', 'request-id': requestId, 'partial-text': partialText }),
+    );
+    if (result.ok) {
+      await reportEffectResult(repl, { kind: 'generate-done', 'request-id': requestId, text: result.text });
+    } else {
+      await reportEffectResult(repl, { kind: 'generate-error', 'request-id': requestId, message: result.error });
+    }
+  } catch (err) {
+    await reportEffectResult(repl, {
+      kind: 'generate-error',
+      'request-id': requestId,
+      message: String((err && err.message) || err),
+    });
+  }
+}
 
 async function runEffect(repl, effect) {
   const { kind } = effect;
@@ -33,9 +71,7 @@ async function runEffect(repl, effect) {
     ...(kind === 'install' ? { source: effect.source } : {}),
     ...outcome,
   };
-  const call = `(app.core/handle-effect-result! ${toEdn(payload)})`;
-  const r = await repl.eval(call);
-  if (r.is_error) console.error('handle-effect-result! failed', r.result, call);
+  await reportEffectResult(repl, payload);
 }
 
 async function main() {
@@ -71,7 +107,8 @@ async function main() {
           console.error('malformed effects payload', r.result);
         }
         for (const effect of effects) {
-          await runEffect(repl, effect);
+          if (effect.kind === 'generate') await runGenerateEffect(repl, effect);
+          else await runEffect(repl, effect);
         }
       } else {
         console.error('take-effects! failed', r.result);
