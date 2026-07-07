@@ -70,3 +70,21 @@ code paths a user hits:
 - `test/e2e/watchdog.mjs` — a calculator whose `:compute` hangs for certain inputs trips
   the deadline, its worker gets killed and replaced, and the calculator keeps working
   afterwards.
+
+## Deployment
+
+`.github/workflows/deploy.yml` builds the app and uploads it to a static SFTP host on
+every push to `main` (or manually via workflow_dispatch). It stages only the
+runtime-required files — `dist/`, `build/wasm-shell/pkg/`, `src/host/` — into `deploy/`
+(`npm run prepare-deploy`; see `build/prepare-deploy.mjs`), plus a generated `index.html`
+that redirects the site root to `/src/host/index.html` (the app's real entry point,
+whose relative script/style tags mean it has to be served from that path).
+
+Add these repo secrets (Settings → Secrets and variables → Actions) for the workflow to
+authenticate:
+
+- `SFTP_SERVER` — hostname or IP
+- `SFTP_PORT` — usually `22`
+- `SFTP_USERNAME`
+- `SFTP_PASSWORD`
+- `SFTP_REMOTE_PATH` — the remote directory to upload into (e.g. your web root)

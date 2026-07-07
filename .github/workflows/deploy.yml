@@ -1,0 +1,50 @@
+name: Deploy to SFTP
+
+# Builds the app (wasm-pack + the two .cljrs bundles) and uploads exactly the
+# runtime-required files -- dist/, build/wasm-shell/pkg/, src/host/ (see
+# build/prepare-deploy.mjs) -- to a static SFTP host on every push to main.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: build/wasm-shell
+
+      - uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+
+      - run: npm ci
+
+      - name: Build app (wasm-shell + cljrs bundles)
+        run: npm run build
+
+      - name: Stage deploy/ (only the files the app fetches/imports at runtime)
+        run: npm run prepare-deploy
+
+      - name: Upload to SFTP
+        uses: wlixcc/SFTP-Deploy-Action@v1.2.6
+        with:
+          server: ${{ secrets.SFTP_SERVER }}
+          port: ${{ secrets.SFTP_PORT }}
+          username: ${{ secrets.SFTP_USERNAME }}
+          password: ${{ secrets.SFTP_PASSWORD }}
+          local_path: './deploy/*'
+          remote_path: ${{ secrets.SFTP_REMOTE_PATH }}
+          sftp_only: true
