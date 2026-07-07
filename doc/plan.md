@@ -878,3 +878,23 @@ Open questions from milestone 3:
   trivial repeated multiplication for one less nesting level to get wrong. Verified
   numerically equivalent to the original (same interest/payoff-months output) before
   committing to it. **Not yet re-verified against the actual failing prompt.**
+- **Real-world finding, root cause**: raising `max_tokens` and adding a numeric-
+  finiteness prompt rule (previous commit) didn't fix it -- three *different* models
+  (Llama 3.3, Kimi K2.7 Code, GLM) all kept failing `:compute did not return a finite
+  number for [:payoff-months]` regardless. Three unrelated models failing the identical
+  check pointed away from generation quality and at the validator itself. Got an actual
+  failing source pasted in (worth doing much earlier -- see the design-change bullet
+  above about why that matters) and traced it: `:payoff-months` was a plain integer
+  loop counter, starting at 0, only ever `inc`'d, hard-capped at 1200 -- mathematically
+  impossible to be non-finite. `app.contract/smoke-test`'s numeric check called
+  `(finite? v)` directly; `finite?` in this interpreter appears to be float/double-
+  specific and was returning falsy for a genuinely-finite plain integer, so *every*
+  calculator with an `:integer`-formatted output computed via integer arithmetic was
+  failing smoke-test regardless of which model (or hand-written source) produced it --
+  this was never a generation-quality problem at all. Fixed by skipping the `finite?`
+  call for integers entirely (`(or (integer? v) (finite? v))`): an integer value can't
+  represent infinity or NaN by construction, so the check is unnecessary for that case.
+  Lesson for next time this kind of pattern shows up: ask for the actual failing source
+  immediately rather than iterating on prompts/models first -- every fix attempted
+  before this one (better model, more tokens, more prompt guidance) was aimed at the
+  wrong layer entirely.

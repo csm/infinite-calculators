@@ -130,10 +130,20 @@
             output-ids (set (map :id outputs))
             missing (remove #(contains? out %) output-ids)
             numeric-formats #{:currency :percent :integer :decimal}
+            ;; Real-world finding: `finite?` here rejected plain integers
+            ;; that were mathematically guaranteed finite (a hard-capped
+            ;; loop counter, e.g. :payoff-months) -- it appears to be
+            ;; float/double-specific in this interpreter rather than a
+            ;; general numeric-tower check, so it was silently failing every
+            ;; calculator with an :integer-formatted output computed via
+            ;; integer arithmetic, independent of which model generated it.
+            ;; An integer value can never be infinite or NaN by
+            ;; construction, so skip the finite? call for one entirely.
             bad-numeric (->> outputs
                               (filter #(numeric-formats (first (:format %))))
                               (map :id)
-                              (remove #(let [v (get out %)] (and (number? v) (finite? v)))))]
+                              (remove #(let [v (get out %)]
+                                         (and (number? v) (or (integer? v) (finite? v))))))]
         (cond
           (seq missing)
           {:ok false :errors [{:message (str ":compute result missing outputs: " (vec missing))}]}
