@@ -1,17 +1,19 @@
 (ns app.genpipe)
 ;; Generation pipeline (doc/plan.md §6): pure helpers app.core's dispatch!/
 ;; handle-effect-result! use to drive the describe -> generate -> validate ->
-;; (repair)* -> install flow. The actual network streaming is JS-only work
+;; install flow. The actual network streaming is JS-only work
 ;; (src/host/generation-client.js, called from main.js's effect loop) --
 ;; this namespace only does the parts that are plain data/text manipulation,
 ;; so it's testable the same way as app.contract.
-
-(def max-attempts
-  "One generation attempt plus up to two repair attempts (doc/plan.md §6)."
-  3)
-
-(defn attempts-remaining? [attempt]
-  (< attempt max-attempts))
+;;
+;; A failed attempt (parse/validate/smoke-test/network) stops and shows the
+;; failing source plus the error rather than auto-retrying: debugging
+;; real-model failures needs to actually see what came back, not have it
+;; silently discarded and retried up to a fixed attempt cap (a real-world
+;; finding from this milestone -- see doc/plan.md). app.core's
+;; :generation/retry dispatch case re-queues a repair-style attempt (the
+;; failing source + error fed back, same shape the old automatic retry
+;; used) on demand instead.
 
 (defn extract-source
   "Pulls the calculator source out of a raw model response. The system

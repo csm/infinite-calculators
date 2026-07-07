@@ -106,30 +106,17 @@
             :last-source nil :error nil})
     (queue-generate! description 1 nil nil req-id)))
 
-(defn- retry-generation! [{:keys [description attempt last-source]} error-message]
-  (let [next-attempt (inc attempt)
-        req-id (next-request-id!)]
-    (swap! app-state update :generation merge
-           {:status :streaming :attempt next-attempt :request-id req-id
-            :install-request-id nil :error nil})
-    (queue-generate! description next-attempt last-source error-message req-id)))
-
-(defn- give-up-generation! [message]
-  (swap! app-state update :generation merge {:status :error :error message}))
-
-(defn- handle-generation-failure!
+(defn- fail-generation!
   "A generation attempt failed -- either the model's text didn't extract/
   symbol-scan cleanly, the streaming request itself errored, or the
-  resulting source failed sandbox eval/validate/smoke-test. Repairs (doc/
-  plan.md §6) up to app.genpipe/max-attempts total attempts, then gives up
-  with a friendly, joined error message."
+  resulting source failed sandbox eval/validate/smoke-test. Stops and shows
+  the failing source (if any) plus the error rather than auto-retrying, so
+  a real failure can actually be inspected instead of silently discarded
+  (doc/plan.md §6/§12 milestone-3 note) -- :generation/retry re-queues a
+  repair-style attempt on demand."
   [error-message source]
   (when source (swap! app-state assoc-in [:generation :last-source] source))
-  (let [gen (:generation @app-state)]
-    (if (app.genpipe/attempts-remaining? (:attempt gen))
-      (retry-generation! gen error-message)
-      (give-up-generation!
-       (str "Generation failed after " (:attempt gen) " attempts: " error-message)))))
+  (swap! app-state update :generation merge {:status :error :error error-message}))
 
 (defn dispatch!
   "Registered with replicant.dom/set-dispatch! in boot!. `event` is the map
@@ -194,6 +181,18 @@
       (swap! app-state update :generation merge {:status :idle :error nil})
       (render!))
 
+    :generation/retry
+    (do
+      (let [gen (:generation @app-state)]
+        (when (= (:status gen) :error)
+          (let [next-attempt (inc (:attempt gen))
+                req-id (next-request-id!)]
+            (swap! app-state update :generation merge
+                   {:status :streaming :attempt next-attempt :request-id req-id
+                    :install-request-id nil :error nil})
+            (queue-generate! (:description gen) next-attempt (:last-source gen) (:error gen) req-id))))
+      (render!))
+
     nil)
   nil)
 
@@ -228,7 +227,7 @@
                      s))))
 
         from-generation?
-        (handle-generation-failure! (app.genpipe/friendly-error (:errors result)) (:last-source gen))
+        (fail-generation! (app.genpipe/friendly-error (:errors result)) (:last-source gen))
 
         from-manual-edit?
         (swap! app-state
@@ -253,11 +252,11 @@
                          (assoc-in [:generation :last-source] source)
                          (assoc-in [:generation :install-request-id] install-req))))
             (queue-effect! {:kind "install" :request-id install-req :calc-id "main" :source source}))
-          (handle-generation-failure! (app.genpipe/friendly-error (:errors scan)) source))))
+          (fail-generation! (app.genpipe/friendly-error (:errors scan)) source))))
 
     "generate-error"
     (when (= request-id (get-in @app-state [:generation :request-id]))
-      (handle-generation-failure! (:message result) nil))
+      (fail-generation! (:message result) nil))
 
     "compute"
     (when (= request-id (get-in @app-state [:calc :compute-request-id]))

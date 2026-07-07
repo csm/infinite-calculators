@@ -36,12 +36,18 @@
 
 (defn generation-panel
   "Milestone 3 (doc/plan.md §6): a description box that drives the
-  generate -> validate -> (repair)* -> install pipeline in app.core. `busy?`
-  covers both :streaming (waiting on the model) and :installing (waiting on
-  the sandbox's eval/validate/smoke-test of the extracted source) -- the
-  input and button are disabled for both, since a new submit mid-pipeline
-  would race the in-flight :generation :request-id."
-  [{:keys [status description attempt error]}]
+  generate -> validate -> install pipeline in app.core. `busy?` covers both
+  :streaming (waiting on the model) and :installing (waiting on the
+  sandbox's eval/validate/smoke-test of the extracted source) -- the input
+  and button are disabled for both, since a new submit mid-pipeline would
+  race the in-flight :generation :request-id.
+
+  A failure stops rather than auto-retrying (doc/plan.md's milestone-3
+  note): :error shows the actual failing source alongside the error, so a
+  real generation failure can be inspected instead of silently discarded,
+  plus a Retry button that re-queues a repair-style attempt (the failing
+  source + error fed back to the model) on demand."
+  [{:keys [status description attempt error last-source]}]
   (let [busy? (contains? #{:streaming :installing} status)
         trimmed (clojure.string/trim (or description ""))]
     [:div {:class "generation-panel"}
@@ -54,9 +60,8 @@
       [:button {:disabled (or busy? (empty? trimmed))
                 :on {:click [:generation/submit]}}
        (cond
-         (= status :installing) "Validating…"
-         (> attempt 1) (str "Regenerating (attempt " attempt " of " app.genpipe/max-attempts ")…")
-         (= status :streaming) "Generating…"
+         (= status :installing) (str "Validating" (when (> attempt 1) (str " (attempt " attempt ")")) "…")
+         (= status :streaming) (str "Generating" (when (> attempt 1) (str " (attempt " attempt ")")) "…")
          :else "Generate")]]
      (when busy?
        ;; The text content of .generation-partial is written directly by
@@ -68,7 +73,13 @@
      (when (= status :error)
        [:div {:class "generation-error"}
         [:p error]
-        [:button {:on {:click [:generation/dismiss-error]}} "Dismiss"]])]))
+        (when last-source
+          [:div {:class "generation-bad-source"}
+           [:p {:class "generation-bad-source-label"} "What attempt " attempt " produced:"]
+           [:pre {:class "generation-bad-source-code"} last-source]])
+        [:div {:class "generation-error-actions"}
+         [:button {:on {:click [:generation/retry]}} "Retry"]
+         [:button {:on {:click [:generation/dismiss-error]}} "Dismiss"]]])]))
 
 (defn view
   "Pure function from app-state to hiccup. No DOM access here -- rendering

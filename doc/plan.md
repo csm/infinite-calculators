@@ -402,9 +402,17 @@ prompt ──► build messages ──► model backend (stream) ──► extra
   on the declared defaults under the watchdog deadline, check outputs are finite
   numbers where numeric formats are declared.
 - **Repair**: on failure, re-prompt with the failing source plus the specific error
-  ("`:compute` returned NaN for `:total-interest` with default inputs"). Two retries,
-  then surface a friendly error with a "try rephrasing" hint and the raw failure behind
-  a details toggle. This loop is what makes small in-browser models viable.
+  ("`:compute` returned NaN for `:total-interest` with default inputs").
+  **Built differently than originally planned here**: rather than retrying
+  automatically (up to a fixed count) and only surfacing a friendly error after
+  exhausting them, a failure stops immediately and shows the actual failing source
+  alongside the error (`app.render`'s `.generation-bad-source`), with a **Retry**
+  button that re-queues one repair-style attempt on demand
+  (`:generation/retry` in `app.core`). Changed after a real-world debugging session
+  during this milestone: automatic retries made failures impossible to actually
+  diagnose (each bad attempt vanished before it could be inspected), which is what
+  the source view exists to prevent in the first place (§1's trust framing). There is
+  no attempt cap now — the user decides when to stop retrying.
 - **Streaming UX**: token stream is shown live (as dimmed source scrolling by) so the
   wait feels shorter and reinforces the "it writes real code" framing.
 - **Refinement** reuses the pipeline with the current (possibly user-edited) source
@@ -671,27 +679,27 @@ sibling namespaces already brought into existence earlier in the same bundle, ne
    multi-calculator library — the `:calculators` map from §3 and a home screen are
    still just a shape, not wired up, since there's no generation yet to populate more
    than one. *The app is now fully useful with pasted code.*
-3. **Hosted generation** — ✅ built this session, **not yet verified in a real browser**
-   (this session's sandbox had no network path to build `wasm-shell` — see the note
-   below — so `npm run test:e2e` has not actually been run against this code; treat it
-   as needing that verification pass before merge). Scope built: `proxy/` (a small
-   Node HTTP server, provider-agnostic — `proxy/providers/anthropic.mjs` is the real
-   one, `proxy/providers/fake.mjs` a scripted stand-in used only by the e2e test) that
+3. **Hosted generation** — ✅ built and verified live this session, through several
+   rounds of real-device debugging (see §12's milestone-3 notes below — a mobile-Safari
+   streaming crash, a too-low `max_tokens` causing silent truncation, and a
+   `symbol-scan` validation gap, all found and fixed against a real hosted model, not
+   just the fake-provider e2e suite). Scope built: `proxy/` (a small Node HTTP server,
+   provider-agnostic — `proxy/providers/anthropic.mjs` and `together.mjs` are the real
+   ones, `proxy/providers/fake.mjs` a scripted stand-in used only by the e2e test) that
    holds the API key, assembles the system prompt + few-shot examples from `/prompts/`
    plus the user's description (or, on a repair attempt, the failing source and error),
    and passes the model's token stream through as a small normalized SSE format;
-   `src/host/generation-client.js` (SSE parsing, JS-only per §7) and a `:generate`
-   effect case in `main.js` that reports partial text and a final result back into the
-   Repl over several `handle-effect-result!` calls instead of runEffect's usual single
-   awaited outcome; `src/app/genpipe.cljrs` (pure text-extraction/attempt-tracking
-   helpers) plus new `:generation` state and dispatch/`handle-effect-result!` cases in
-   `app.core` that drive describe → stream → extract → symbol-scan → (reusing the
-   existing sandbox `:install` effect) → repair-on-failure (two retries, §6) → give up
-   with a friendly error, all wired into a new generation panel in `app.render`. *First
-   end-to-end "describe → calculator" moment* — pending the verification pass above.
-   `test/e2e/generation.mjs` exercises the real proxy, real streaming parse, and real
-   sandbox install/validate/smoke-test against the fake provider (success on the first
-   attempt, recovery via one repair attempt, and giving up after exhausting retries).
+   `src/host/generation-client.js` (SSE parsing, JS-only per §7), whose streamed
+   progress `main.js` writes straight to the DOM rather than through the Repl (see
+   above); `src/app/genpipe.cljrs` (pure text-extraction helpers) plus new
+   `:generation` state and dispatch/`handle-effect-result!` cases in `app.core` that
+   drive describe → stream → extract → symbol-scan → (reusing the existing sandbox
+   `:install` effect) → **stop and show the failure** (not auto-retry, see §6) — with a
+   manual Retry, wired into a new generation panel in `app.render`. *First end-to-end
+   "describe → calculator" moment.* `test/e2e/generation.mjs` exercises the real proxy,
+   real streaming parse, and real sandbox install/validate/smoke-test against the fake
+   provider (first-attempt success, a failure showing its bad source with manual-retry
+   recovery, and Dismiss on an unrecoverable failure).
 4. **WebLLM backend** — model download UX, backend picker, eval suite to pick the
    default model, tune prompts/repair for the small model.
 5. **Polish** — CodeMirror editor, library/persistence, share links, refine prompts,
@@ -844,3 +852,15 @@ Open questions from milestone 3:
   **Not yet re-verified against the actual failing prompt** (true of both findings
   above -- the mortgage prompt has now failed differently twice in a row rather than
   successfully installing).
+- **Design change following the above**: three real-model debugging rounds in a row
+  were each slowed down by the automatic repair loop -- a failure retried and gave up
+  on its own before the actual bad source could ever be inspected, so every fix so far
+  had to be reasoned about from an error *message* alone, never the generated code that
+  produced it. Replaced the automatic "retry up to `app.genpipe/max-attempts`, then
+  give up" behavior (§6 as originally planned) with: stop immediately on any failure,
+  show the failing source next to the error (`app.render`'s `.generation-bad-source`),
+  and let the user trigger exactly one repair-style retry at a time via a **Retry**
+  button (`:generation/retry`). No attempt cap anymore. This is a better fit for a
+  product whose whole pitch is "the source is real and inspectable" (§1) — auto-retry
+  was fighting that goal specifically in the failure case, which is exactly when
+  inspectability matters most.

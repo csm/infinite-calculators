@@ -5,19 +5,19 @@ in the browser on **Clojurust** via **cljrs-wasm**. See [`doc/plan.md`](doc/plan
 the full design.
 
 This is milestone 3 (**hosted generation**): describing a calculator in plain English
-streams a generation from a hosted LLM through a small proxy, extracts and symbol-scans
-the resulting source, and installs it through the same sandbox pipeline milestone 2
-built (eval → validate → smoke test). A failed attempt is repaired automatically (the
-specific validator/smoke-test error is fed back to the model, up to two retries) before
-giving up with a friendly error — the calculator that was already running is never
-disturbed by a failed generation. Milestone 2's textarea source editor still works the
-same way on whatever gets installed, generated or hand-written.
+streams a generation from a hosted LLM (Anthropic or Together AI) through a small
+proxy, extracts and symbol-scans the resulting source, and installs it through the same
+sandbox pipeline milestone 2 built (eval → validate → smoke test). A failure stops
+immediately and shows the actual failing source next to the error — not auto-retried,
+so a real generation failure can be inspected instead of silently discarded — with a
+**Retry** button to ask the model for a fix on demand. The calculator that was already
+running is never disturbed by a failed generation. Milestone 2's textarea source editor
+still works the same way on whatever gets installed, generated or hand-written.
 
-**Not yet run end-to-end in this repo's CI/dev environment**: building `wasm-shell`
-needs a network path to crates.io's download CDN that this session's sandbox didn't
-have, so `npm run test:e2e` (including the new `test/e2e/generation.mjs`) hasn't
-actually executed against this milestone's code yet. See doc/plan.md §13's "milestone
-3" open questions before treating it as verified.
+Verified against a real hosted model (not just the fake-provider e2e suite) through
+several rounds of real-device debugging — see `doc/plan.md`'s milestone-3 notes for the
+mobile-Safari streaming crash, silent-truncation, and validation-gap findings, all
+found and fixed live.
 
 ## Setup
 
@@ -126,9 +126,9 @@ see `proxy/providers/fake.mjs`):
   the deadline, its worker gets killed and replaced, and the calculator keeps working
   afterwards.
 - `test/e2e/generation.mjs` — a description streams through the real proxy and installs
-  through the real sandbox pipeline on the first attempt; a scripted bad first attempt
-  is repaired automatically and still ends up installed; a scripted always-bad attempt
-  exhausts its retries and surfaces a friendly error without disturbing the calculator
+  through the real sandbox pipeline on the first attempt; a scripted bad attempt stops
+  and shows its actual bad source next to the error, and a manual Retry recovers it; a
+  scripted always-bad attempt is cleared with Dismiss without disturbing the calculator
   already running.
 
 ## Deployment

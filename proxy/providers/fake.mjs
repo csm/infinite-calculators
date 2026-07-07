@@ -3,10 +3,11 @@
 // Activated via GENERATION_PROVIDER=fake (see proxy/server.mjs). Looks at
 // the final user turn to decide what to "generate": a description
 // containing BROKEN_MARKER gets an invalid calculator on the first attempt
-// (fails the sandbox smoke test) and a valid one once the repair turn comes
-// back, so this same fake exercises both the happy path and the §6 repair
-// loop without any real model. ALWAYS_BROKEN_MARKER never recovers, to
-// exercise giving up after doc/plan.md §6's two retries.
+// (fails the sandbox smoke test) and a valid one once a repair turn (i.e.
+// a manual :generation/retry, doc/plan.md §6) comes back, so this same
+// fake exercises both the happy path and manual-retry recovery without any
+// real model. ALWAYS_BROKEN_MARKER never recovers even on a repair turn,
+// to exercise Dismiss on a failure that a retry wouldn't fix.
 export const BROKEN_MARKER = 'MAKE_IT_BROKEN';
 export const ALWAYS_BROKEN_MARKER = 'ALWAYS_BROKEN';
 
