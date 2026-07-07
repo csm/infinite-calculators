@@ -583,13 +583,14 @@ storage eviction), offer one-click switch to hosted rather than failing the gene
                               the same wasm module); see §0 for the `wasm-opt = false`
                               build note
 /proxy/                       hosted-model API proxy (milestone 3): server.mjs (a small
-                              Node HTTP server -- not yet deployed to any specific
-                              serverless platform, see doc/plan.md §12's milestone 3
+                              Node HTTP server; deployment target TBD -- Dreamhost shared
+                              hosting can't run it, see doc/plan.md §12's milestone 3
                               note), prompts.mjs (assembles system+few-shot+user/repair
                               messages from /prompts/, §13's "no system-prompt
-                              override"), providers/anthropic.mjs (the real provider)
-                              and providers/fake.mjs (scripted, used only by
-                              test/e2e/generation.mjs -- no API key/network in CI)
+                              override"), providers/anthropic.mjs and providers/
+                              together.mjs (real providers, selected via
+                              GENERATION_PROVIDER) and providers/fake.mjs (scripted, used
+                              only by test/e2e/generation.mjs -- no API key/network in CI)
 /prompts/                     system prompt (system.md) + few-shot examples
                               (examples.json), versioned data the proxy assembles
                               server-side; never sent by or editable from the client

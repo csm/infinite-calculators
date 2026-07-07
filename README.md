@@ -48,9 +48,20 @@ npm run proxy:dev   # listens on :8787 by default (PORT env var)
 
 `proxy/prompts.mjs` assembles the system prompt and few-shot examples from `/prompts/`
 server-side — the client never sends or overrides them (doc/plan.md §13). The proxy is
-provider-agnostic (`proxy/providers/anthropic.mjs`); swapping providers means adding
-another module with the same `streamCompletion({apiKey, model, system, messages})`
-async-generator shape and pointing `GENERATION_PROVIDER` at it.
+provider-agnostic; `GENERATION_PROVIDER` picks which `proxy/providers/*.mjs` module runs
+(`anthropic` is the default, `together` uses Together AI's OpenAI-compatible API,
+`fake` is the scripted one `test/e2e/generation.mjs` uses):
+
+```sh
+export GENERATION_PROVIDER=together
+export TOGETHER_API_KEY=...
+export GENERATION_MODEL=meta-llama/Llama-3.3-70B-Instruct-Turbo   # optional, this is the default
+npm run proxy:dev
+```
+
+Adding another provider means writing a module with the same
+`streamCompletion({apiKey, model, system, messages}) -> AsyncGenerator<string>` shape and
+adding it to the `PROVIDERS` map in `proxy/server.mjs`.
 
 ## Layout
 

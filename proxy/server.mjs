@@ -20,9 +20,22 @@ const MAX_DESCRIPTION_LEN = 500;
 const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 const RATE_LIMIT_MAX = 20;
 
-const providerModule =
-  process.env.GENERATION_PROVIDER === 'fake' ? './providers/fake.mjs' : './providers/anthropic.mjs';
-const { streamCompletion } = await import(providerModule);
+// Provider-agnostic: each entry's api key env var and default model line up
+// with a proxy/providers/*.mjs module of the same streamCompletion shape.
+// GENERATION_MODEL overrides the default model for whichever provider is
+// selected; the per-provider api key env var is the one that provider's
+// docs use (ANTHROPIC_API_KEY, TOGETHER_API_KEY), so swapping providers is
+// just changing GENERATION_PROVIDER + that provider's key, no code change.
+const PROVIDERS = {
+  anthropic: { module: './providers/anthropic.mjs', apiKey: process.env.ANTHROPIC_API_KEY, defaultModel: 'claude-sonnet-5' },
+  together: { module: './providers/together.mjs', apiKey: process.env.TOGETHER_API_KEY, defaultModel: 'meta-llama/Llama-3.3-70B-Instruct-Turbo' },
+  fake: { module: './providers/fake.mjs', apiKey: null, defaultModel: null },
+};
+const providerName = process.env.GENERATION_PROVIDER || 'anthropic';
+const provider = PROVIDERS[providerName];
+if (!provider) throw new Error(`unknown GENERATION_PROVIDER: ${providerName} (expected one of ${Object.keys(PROVIDERS).join(', ')})`);
+const { streamCompletion } = await import(provider.module);
+const model = process.env.GENERATION_MODEL || provider.defaultModel;
 
 // Best-effort per-IP rate limiting (doc/plan.md §13): in-memory, so it
 // resets on restart / doesn't share state across serverless instances --
@@ -101,12 +114,7 @@ const server = createServer(async (req, res) => {
 
   try {
     const { system, messages } = buildMessages({ description, attempt, priorSource, priorError });
-    for await (const delta of streamCompletion({
-      apiKey: process.env.ANTHROPIC_API_KEY,
-      model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-5',
-      system,
-      messages,
-    })) {
+    for await (const delta of streamCompletion({ apiKey: provider.apiKey, model, system, messages })) {
       sse(res, { delta });
     }
     sse(res, { done: true });
@@ -116,4 +124,4 @@ const server = createServer(async (req, res) => {
   res.end();
 });
 
-server.listen(PORT, () => console.log(`generation proxy listening on :${PORT} (provider: ${providerModule})`));
+server.listen(PORT, () => console.log(`generation proxy listening on :${PORT} (provider: ${providerName}, model: ${model})`));
