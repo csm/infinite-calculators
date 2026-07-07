@@ -41,7 +41,7 @@
   the sandbox's eval/validate/smoke-test of the extracted source) -- the
   input and button are disabled for both, since a new submit mid-pipeline
   would race the in-flight :generation :request-id."
-  [{:keys [status description partial-text attempt error]}]
+  [{:keys [status description attempt error]}]
   (let [busy? (contains? #{:streaming :installing} status)
         trimmed (clojure.string/trim (or description ""))]
     [:div {:class "generation-panel"}
@@ -59,8 +59,12 @@
          (= status :streaming) "Generating…"
          :else "Generate")]]
      (when busy?
+       ;; The text content of .generation-partial is written directly by
+       ;; main.js as tokens stream in, not routed through app-state/render!
+       ;; per chunk (doc/plan.md's milestone-3 mobile-Safari crash finding)
+       ;; -- always "" here so replicant never touches it after mount.
        [:div {:class "generation-stream"}
-        [:pre {:class "generation-partial"} partial-text]])
+        [:pre {:class "generation-partial"} ""]])
      (when (= status :error)
        [:div {:class "generation-error"}
         [:p error]

@@ -16,11 +16,26 @@ async function reportEffectResult(repl, payload) {
 }
 
 // The "generate" effect (doc/plan.md §6/§8) is the one effect that reports
-// back more than once -- partial text as it streams, then a final done/
-// error -- instead of a single awaited outcome like install/compute/logic
-// below, so it can't go through the generic runEffect/single-report path.
+// back more than once -- a final done/error, plus live progress while
+// streaming -- instead of a single awaited outcome like install/compute/
+// logic below, so it can't go through the generic runEffect/single-report
+// path. The live progress text is written straight to the DOM
+// (.generation-partial, rendered once, empty, by app.render when :generation
+// :status enters :streaming) instead of round-tripping through a Repl call
+// per chunk: a multi-second stream was calling repl.eval() every ~80ms with
+// an ever-larger embedded string, which was real, unbounded-feeling memory/
+// CPU churn on the main Repl and was crashing real mobile Safari sessions
+// mid-stream. This is purely cosmetic (doc/plan.md §6's "dimmed source
+// scrolling by"), so it doesn't need the interpreter at all -- only the
+// final `generate-done`/`generate-error` result (one call, not dozens)
+// needs to reach app.core to drive the real pipeline.
 async function runGenerateEffect(repl, effect) {
   const requestId = effect['request-id'];
+  // Clear any text left over from a prior attempt (e.g. a repair retry) --
+  // replicant never touches this node's content itself now (the hiccup
+  // value driving it is always ""), so nothing else will.
+  const previewEl = document.querySelector('.generation-partial');
+  if (previewEl) previewEl.textContent = '';
   try {
     const result = await streamGenerate(
       {
@@ -29,8 +44,10 @@ async function runGenerateEffect(repl, effect) {
         priorSource: effect['prior-source'],
         priorError: effect['prior-error'],
       },
-      (partialText) =>
-        reportEffectResult(repl, { kind: 'generate-token', 'request-id': requestId, 'partial-text': partialText }),
+      (partialText) => {
+        const el = document.querySelector('.generation-partial');
+        if (el) el.textContent = partialText;
+      },
     );
     if (result.ok) {
       await reportEffectResult(repl, { kind: 'generate-done', 'request-id': requestId, text: result.text });

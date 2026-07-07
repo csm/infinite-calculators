@@ -45,7 +45,10 @@
          ;; a generation extracts and symbol-scans cleanly -- both exist so
          ;; handle-effect-result! can tell a generation-triggered install
          ;; apart from a manual source-edit apply (:calc :install-request-id).
-         :generation {:status :idle :description "" :partial-text ""
+         ;; No live partial-text here: the streaming preview is written
+         ;; straight to the DOM by main.js, not routed through the Repl per
+         ;; chunk (doc/plan.md's milestone-3 mobile-Safari crash finding).
+         :generation {:status :idle :description ""
                       :attempt 0 :request-id nil :install-request-id nil
                       :last-source nil :error nil}
          :effects []
@@ -98,7 +101,7 @@
 (defn- start-generation! [description]
   (let [req-id (next-request-id!)]
     (swap! app-state assoc :generation
-           {:status :streaming :description description :partial-text ""
+           {:status :streaming :description description
             :attempt 1 :request-id req-id :install-request-id nil
             :last-source nil :error nil})
     (queue-generate! description 1 nil nil req-id)))
@@ -108,7 +111,7 @@
         req-id (next-request-id!)]
     (swap! app-state update :generation merge
            {:status :streaming :attempt next-attempt :request-id req-id
-            :install-request-id nil :partial-text "" :error nil})
+            :install-request-id nil :error nil})
     (queue-generate! description next-attempt last-source error-message req-id)))
 
 (defn- give-up-generation! [message]
@@ -219,7 +222,7 @@
                              (assoc-in [:calc :ui :source-error] nil)
                              (assoc-in [:calc :ui :draft-source] nil))]
                    (if from-generation?
-                     (assoc s :generation {:status :idle :description "" :partial-text ""
+                     (assoc s :generation {:status :idle :description ""
                                             :attempt 0 :request-id nil :install-request-id nil
                                             :last-source nil :error nil})
                      s))))
@@ -236,10 +239,6 @@
                                (clojure.string/join "; " (map :message (:errors result)))))))
 
         :else nil))
-
-    "generate-token"
-    (when (= request-id (get-in @app-state [:generation :request-id]))
-      (swap! app-state assoc-in [:generation :partial-text] (:partial-text result)))
 
     "generate-done"
     (when (= request-id (get-in @app-state [:generation :request-id]))

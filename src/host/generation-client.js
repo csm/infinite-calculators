@@ -3,10 +3,11 @@
 // parsing don't exist inside a Repl (§7) -- so it's called from main.js's
 // effect loop, not from Clojurust. Reports partial text back to the caller
 // as it streams (throttled, since the "dimmed source scrolling by" UX only
-// needs to look live, not reflect every byte) and resolves once with the
-// full text or an error, matching the two `handle-effect-result!` events
-// app.core expects (see app.core/handle-effect-result!'s "generate-token"/
-// "generate-done"/"generate-error" cases).
+// needs to look live, not reflect every byte) -- main.js writes this
+// straight to the DOM rather than through the Repl (see its comment on
+// runGenerateEffect) -- and resolves once with the full text or an error,
+// which main.js reports to app.core as a single "generate-done"/
+// "generate-error" handle-effect-result! call.
 const TOKEN_REPORT_INTERVAL_MS = 80;
 
 export async function streamGenerate({ description, attempt, priorSource, priorError }, onToken) {

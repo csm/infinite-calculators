@@ -765,26 +765,39 @@ Open questions from milestone 3:
   or `proxy/providers/together.mjs` yet; the few-shot examples in `prompts/examples.json`
   are believed to stay within the §4 dialect subset but haven't been eval'd against the
   pinned cljrs-wasm version the way the golden-calculator suite pins hand-written ones.
-- **Real-world finding**: a real hosted-model generation for "mortgage with extra
-  principal" (a near-verbatim match of the mortgage few-shot example's description)
-  crashed a real mobile Safari tab right at the "Validating…" step -- i.e. during the
-  sandbox's install eval/smoke-test, not during streaming. Leading theory: the model's
-  generated `:compute` reproduced (or attempted to reproduce) the mortgage example's
-  amortization `loop`, and either that loop or the model's variant of it ran long enough
-  to hit `sandbox-manager.js`'s install watchdog -- pegging a CPU core at 100% for the
-  full deadline before `Worker.terminate()` could even fire, which was apparently enough
-  sustained load on its own to crash the tab (independent of the poll-loop finding
-  above). The original mortgage example's cap, `(>= months (* n 2))`, is *derived* from
-  input-controlled values (years), not a literal -- a model reproducing that pattern
-  with a bug in the derivation could produce an effectively-unbounded loop. Two
-  mitigations shipped, neither verified against the actual crash yet: (1)
-  `INSTALL_DEADLINE_MS`/`CALL_DEADLINE_MS` cut from 5000/2000ms to 2000/1000ms, shortening
-  worst-case pegged-CPU duration (legitimate calculators run in low milliseconds, so this
-  is pure headroom reduction, not a real budget cut); (2) `prompts/system.md` gained a
-  hard rule requiring any `loop`/`recur` to check a literal-number iteration cap first,
-  and the mortgage example itself was rewritten to use a named `max-months` literal
-  instead of `(* n 2)`, so future generations have a safer pattern to imitate. Neither
-  change addresses the root architectural gap: **there is still no way to bound a single
-  `:compute`/`:logic` call's execution from inside the interpreter** (§5's "no fuel
+- **Real-world finding, first pass (superseded below)**: a real hosted-model generation
+  for "mortgage with extra principal" (a near-verbatim match of the mortgage few-shot
+  example's description) crashed a real mobile Safari tab. Initial (incorrect) theory,
+  based on the report saying it crashed "at" the transition to "Validating…": the
+  model's generated `:compute` reproduced the mortgage example's amortization `loop`
+  with a bug in its termination, pegging `sandbox-manager.js`'s install watchdog's CPU
+  budget. Shipped anyway since they're safe, low-cost improvements regardless: (1)
+  `INSTALL_DEADLINE_MS`/`CALL_DEADLINE_MS` cut from 5000/2000ms to 2000/1000ms; (2)
+  `prompts/system.md` gained a hard rule requiring any `loop`/`recur` to check a
+  literal-number iteration cap first, and the mortgage example itself was rewritten to
+  use a named `max-months` literal instead of the original's *derived* `(* n 2)` cap.
+  Neither addresses the root architectural gap: **there is still no way to bound a
+  single `:compute`/`:logic` call's execution from inside the interpreter** (§5's "no fuel
   metering" limitation) -- the watchdog is strictly reactive and, on a resource-
   constrained device, may not react fast enough to prevent a crash.
+- **Real-world finding, corrected**: retested on the same device/prompt after the above
+  shipped -- still crashed, and the report this time was specific: it crashed *during*
+  streaming, before the model's response even finished, so the install/watchdog theory
+  above was wrong (there's no sandbox worker involved yet at that point). Actual cause:
+  `main.js`'s live "dimmed source scrolling by" progress UX (doc/plan.md §6) called
+  `repl.eval()` on the *main* Repl roughly every 80ms for the whole streaming duration,
+  each call re-serializing and re-parsing the *entire accumulated response text so far*
+  as a growing Clojure string literal -- dozens of calls per generation, string size
+  increasing each time. That's real, unbounded-feeling memory/CPU churn on the main
+  Repl sustained for the whole stream, independent of anything about the generated code
+  itself (explaining why it reproduced on a *different* description too, not just the
+  mortgage one). Fixed by removing the interpreter from this path entirely: the live
+  preview now writes straight to the `.generation-partial` DOM node from JS
+  (`main.js`'s `runGenerateEffect`), with `app.render` only ever mounting it empty and
+  never touching its text again -- only the single final `generate-done`/`generate-error`
+  result still reaches `app.core` via the Repl, matching every other effect's one-call
+  shape (doc/plan.md §7). **Not yet re-verified on the device that crashed.** If this
+  doesn't fix it, the next suspect is the main-Repl reentrancy question two bullets up
+  (this fix removes a lot of `repl.eval()` traffic during streaming but the
+  `generate-token` calls it removed weren't the *only* main-Repl activity happening
+  during that window -- render! calls from any other concurrent dispatch! still are).
