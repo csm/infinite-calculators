@@ -32,7 +32,9 @@ const PROVIDERS = {
   // about which closing bracket *type* (not count) ends a long run of
   // nested closers at the end of a calculator form -- a code-specialized
   // model is a better fit for this exact-bracket-matching-heavy task.
-  together: { module: './providers/together.mjs', apiKey: process.env.TOGETHER_API_KEY, defaultModel: 'Qwen/Qwen2.5-Coder-32B-Instruct' },
+  // Qwen/Qwen2.5-Coder-32B-Instruct (tried first) turned out not to be on
+  // Together's serverless tier; Kimi K2.7 Code is.
+  together: { module: './providers/together.mjs', apiKey: process.env.TOGETHER_API_KEY, defaultModel: 'moonshotai/Kimi-K2.7-Code' },
   fake: { module: './providers/fake.mjs', apiKey: null, defaultModel: null },
 };
 const providerName = process.env.GENERATION_PROVIDER || 'anthropic';
