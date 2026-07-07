@@ -90,7 +90,7 @@ try {
   await input.fill('5000');
   await input.dispatchEvent('input');
 
-  // The :compute deadline is 2s; the worker gets killed and replaced, and
+  // The :compute deadline is 1s; the worker gets killed and replaced, and
   // the card must report the failure rather than hang.
   await page.waitForTimeout(3000);
   assertEqual(pageErrors.length, 0, 'no uncaught page errors even while a worker is killed');

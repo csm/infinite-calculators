@@ -74,6 +74,16 @@ The map passed to `calculator` has five keys, all required:
    `clojure.string/index-of`/`subs` (regex support is unconfirmed; do not rely on it).
 6. Keep `:logic` honest: its formulas and values must describe exactly what `:compute`
    does, since the app shows this to the user as the proof the number is trustworthy.
+7. **Every `loop`/`recur` must carry its own hard iteration cap as a literal number in
+   the loop bindings, checked first in the termination condition** — never rely solely
+   on a derived quantity (like "the balance reaches zero") to end a loop, even if that
+   should always be true mathematically. Bind a counter and a fixed cap together, e.g.
+   `(loop [i 0 balance principal] (if (or (>= i 1200) (<= balance 0)) ... (recur (inc i) ...)))`
+   — 1200 here, not a formula. There is no interpreter-level timeout inside your code:
+   a bug that leaves the derived condition unreachable spins forever and is only ever
+   stopped by an external watchdog killing the whole sandbox, which is disruptive to the
+   user. The literal cap is your only real safety net, so it must not itself depend on
+   input values that could be wrong.
 
 ## Repair attempts
 

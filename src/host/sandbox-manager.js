@@ -4,8 +4,16 @@
 // infinite `loop`/`recur`, so a timed-out request terminates and replaces
 // just that calculator's worker -- every other installed calculator lives in
 // its own worker and is unaffected.
-const INSTALL_DEADLINE_MS = 5000;
-const CALL_DEADLINE_MS = 2000;
+//
+// Kept short deliberately: a legitimate calculator's :compute/:logic run in
+// milliseconds, so these are almost pure headroom, not a real budget. A
+// runaway loop in generated code pegs a CPU core at 100% for the full
+// deadline before Worker.terminate() can even fire -- observed to be enough
+// sustained load to crash mobile Safari outright on a real device (see
+// doc/plan.md's milestone-3 open questions), so shorter is safer even
+// though it doesn't fix the underlying "generated code can hang" risk.
+const INSTALL_DEADLINE_MS = 2000;
+const CALL_DEADLINE_MS = 1000;
 
 class CalcWorker {
   constructor() {

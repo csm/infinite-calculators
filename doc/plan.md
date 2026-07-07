@@ -765,3 +765,26 @@ Open questions from milestone 3:
   or `proxy/providers/together.mjs` yet; the few-shot examples in `prompts/examples.json`
   are believed to stay within the §4 dialect subset but haven't been eval'd against the
   pinned cljrs-wasm version the way the golden-calculator suite pins hand-written ones.
+- **Real-world finding**: a real hosted-model generation for "mortgage with extra
+  principal" (a near-verbatim match of the mortgage few-shot example's description)
+  crashed a real mobile Safari tab right at the "Validating…" step -- i.e. during the
+  sandbox's install eval/smoke-test, not during streaming. Leading theory: the model's
+  generated `:compute` reproduced (or attempted to reproduce) the mortgage example's
+  amortization `loop`, and either that loop or the model's variant of it ran long enough
+  to hit `sandbox-manager.js`'s install watchdog -- pegging a CPU core at 100% for the
+  full deadline before `Worker.terminate()` could even fire, which was apparently enough
+  sustained load on its own to crash the tab (independent of the poll-loop finding
+  above). The original mortgage example's cap, `(>= months (* n 2))`, is *derived* from
+  input-controlled values (years), not a literal -- a model reproducing that pattern
+  with a bug in the derivation could produce an effectively-unbounded loop. Two
+  mitigations shipped, neither verified against the actual crash yet: (1)
+  `INSTALL_DEADLINE_MS`/`CALL_DEADLINE_MS` cut from 5000/2000ms to 2000/1000ms, shortening
+  worst-case pegged-CPU duration (legitimate calculators run in low milliseconds, so this
+  is pure headroom reduction, not a real budget cut); (2) `prompts/system.md` gained a
+  hard rule requiring any `loop`/`recur` to check a literal-number iteration cap first,
+  and the mortgage example itself was rewritten to use a named `max-months` literal
+  instead of `(* n 2)`, so future generations have a safer pattern to imitate. Neither
+  change addresses the root architectural gap: **there is still no way to bound a single
+  `:compute`/`:logic` call's execution from inside the interpreter** (§5's "no fuel
+  metering" limitation) -- the watchdog is strictly reactive and, on a resource-
+  constrained device, may not react fast enough to prevent a crash.
