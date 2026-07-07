@@ -128,7 +128,16 @@
     (let [field (second action)
           raw (cljrs.dom/value (:replicant/node event))
           input-spec (first (filter #(= (:id %) field) (get-in @app-state [:calc :spec :inputs])))
-          parsed (if (#{:number :integer} (:type input-spec)) (or (parse-double raw) 0) raw)]
+          ;; A <select>'s DOM value is always a string, but the option's
+          ;; declared :value can be numeric (app.render/field-input renders
+          ;; <option :value (str value)>) -- look the chosen option back up
+          ;; by its stringified value to recover the original type instead
+          ;; of storing the raw string.
+          parsed (cond
+                   (#{:number :integer} (:type input-spec)) (or (parse-double raw) 0)
+                   (= :select (:type input-spec))
+                   (:value (first (filter #(= (str (:value %)) raw) (:options input-spec))))
+                   :else raw)]
       (swap! app-state assoc-in [:calc :inputs field] parsed)
       (queue-compute!)
       (render!))

@@ -163,9 +163,24 @@
               :else
               {:ok true :outputs out :steps (:value logic-result)})))))))
 
+;; Real-world finding: `finite?` (above) turned out to be float/double-
+;; specific in this interpreter rather than general across the numeric
+;; tower -- a plain integer (e.g. a loop counter, exactly what a
+;; :payoff-months-style :integer output usually is) returned falsy from
+;; a *finite* value. `Math/round`/`Math/abs` are native fns of the same
+;; kind and family; coercing to a double before calling them is cheap
+;; insurance against the same class of bug, which for a native fn (as
+;; opposed to a Clojure-level exception `smoke-test` can catch) could be a
+;; hard wasm-level panic instead of a catchable error -- observed as
+;; "unreachable code should not be executed" mid-render, which is
+;; considerably worse than a validation message. `(* x 1.0)` promotes any
+;; number to a double via ordinary arithmetic, without depending on
+;; whether a dedicated cast fn like `double` exists in this dialect.
+(defn- as-double [x] (* x 1.0))
+
 (defn- round-to [n x]
   (let [scale (Math/pow 10 n)]
-    (/ (Math/round (* x scale)) scale)))
+    (/ (Math/round (* (as-double x) scale)) scale)))
 
 (defn- pad2 [n]
   (if (< n 10) (str "0" n) (str n)))
@@ -174,7 +189,8 @@
   (case code "USD" "$" "EUR" "€" "GBP" "£" (str code " ")))
 
 (defn- format-currency [code value]
-  (let [negative (neg? value)
+  (let [value (as-double value)
+        negative (neg? value)
         v (Math/abs value)
         cents (Math/round (* v 100))
         dollars (quot cents 100)
@@ -182,7 +198,7 @@
     (str (when negative "-") (currency-symbol code) dollars "." (pad2 rem-cents))))
 
 (defn- format-duration [seconds]
-  (let [total (Math/round seconds)
+  (let [total (Math/round (as-double seconds))
         h (quot total 3600)
         m (quot (mod total 3600) 60)
         s (mod total 60)]
@@ -199,7 +215,7 @@
   (case kind
     :currency (format-currency (or (first args) "USD") value)
     :percent (str (round-to 1 value) "%")
-    :integer (str (Math/round value))
+    :integer (str (Math/round (as-double value)))
     :decimal (str (round-to 2 value))
     :duration (format-duration value)
     :unit (str (round-to 2 value) (when-let [u (first args)] (str " " u)))

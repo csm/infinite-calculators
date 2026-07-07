@@ -898,3 +898,32 @@ Open questions from milestone 3:
   immediately rather than iterating on prompts/models first -- every fix attempted
   before this one (better model, more tokens, more prompt guidance) was aimed at the
   wrong layer entirely.
+- **Real-world finding, more severe**: with the `finite?` fix live, the mortgage
+  calculator installed but rendered a mix of new and stale content (mortgage-labeled
+  inputs alongside leftover tip-calculator outputs) and the browser console repeated
+  `unreachable code should not be executed` from `infinite_calculators_wasm_shell.js`
+  -- a wasm-level Rust panic/trap, not a catchable Clojure exception, and (per the
+  half-updated DOM) one that struck mid-`replicant.dom/render`, after inputs patched
+  but before outputs did. Two real bugs found and fixed together:
+  1. **`:select` inputs were never actually implemented.** The §4 contract declared
+     `:select` as a valid `:type` since milestone 1, but `app.render/field-input`
+     always rendered a plain `<input>` regardless of `:type` -- nothing had ever
+     generated a `:select`-typed calculator before this, so the gap went unnoticed.
+     Now renders a real `<select>`/`<option>` list; `app.core`'s `:set-input` handler
+     looks the chosen option back up by its stringified value to recover the
+     option's original (possibly numeric) `:value`, since a DOM `<select>`'s value is
+     always a string.
+  2. **The same float/double-specific-native-fn pattern as the `finite?` bug, in a much
+     more dangerous spot.** `app.contract/format-value`'s `:integer` case called
+     `(Math/round value)` directly on `:payoff-months` (a genuine integer). Unlike
+     `finite?` returning a wrong-but-safe boolean, a native math fn hitting an
+     unexpected integer type in the underlying Rust likely panics outright --
+     matching the exact "unreachable code" wording (Rust's `unreachable!()` macro) and
+     the observed mid-render crash location (`output-row` calls `format-value` while
+     rendering the outputs section, right after inputs). Defensively coerces every
+     value to a double (`(* x 1.0)`, plain arithmetic promotion, no cast fn assumed)
+     before any `Math/round`/`Math/abs` call in `format-value`, on the theory that this
+     class of bug likely affects any native math fn given a non-double number, not
+     just `finite?` specifically. **Root cause unconfirmed** -- this is the best
+     available theory given the symptom match, not a verified fix, since a wasm panic
+     can't be introspected from here the way a Clojure exception can.

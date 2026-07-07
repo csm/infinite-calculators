@@ -1,11 +1,22 @@
 (ns app.render)
 
-(defn field-input [{:keys [id label value unit type]}]
+(defn field-input
+  "Real-world finding: :select was declared in the §4 contract from
+  milestone 1 but this always rendered a plain text <input> regardless of
+  :type -- never actually implemented, and never noticed because nothing
+  had generated a :select-typed calculator until now. `:on {:change ...}`
+  matches the dispatch!/:set-input handler in app.core, which looks the
+  chosen option back up by its stringified :value to recover its original
+  (possibly numeric) value -- HTML <select> values are always strings."
+  [{:keys [id label value unit type options]}]
   [:label {:class "field"}
    [:span {:class "field-label"} label]
-   [:input {:type (if (#{:number :integer} type) "number" "text")
-            :value value
-            :on {:input [:set-input id]}}]
+   (if (= type :select)
+     [:select {:value (str value) :on {:change [:set-input id]}}
+      (map (fn [{:keys [value label]}] [:option {:value (str value)} label]) options)]
+     [:input {:type (if (#{:number :integer} type) "number" "text")
+              :value value
+              :on {:input [:set-input id]}}])
    (when unit [:span {:class "field-unit"} unit])])
 
 (defn output-row [{:keys [id label format]} outputs]
