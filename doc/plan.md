@@ -864,3 +864,17 @@ Open questions from milestone 3:
   product whose whole pitch is "the source is real and inspectable" (§1) — auto-retry
   was fighting that goal specifically in the failure case, which is exactly when
   inspectability matters most.
+- **Real-world finding**: with the bad source now actually visible (the point of the
+  design change above), the "mortgage with extra principal" failure turned out to be
+  an extra `)` in the model's own generated `:compute` -- a real syntax mistake, not a
+  bug in this codebase. Checked the mortgage few-shot example itself character-by-
+  character (bracket-depth tracking, respecting strings/comments) to rule out the
+  model having copied a genuine imbalance from it -- it was already balanced. The
+  actual issue: that example's `loop` body nested `if` → `let` → `recur` several
+  levels deep, and deep nesting is exactly where a model reproducing a *similar but not
+  identical* structure is most likely to drop or add a stray paren. Flattened it --
+  the inner `let` (binding `interest`/`principal-paid`) is gone; `(* balance r)` is
+  just computed twice inline in the `recur` call instead of named once -- trading a
+  trivial repeated multiplication for one less nesting level to get wrong. Verified
+  numerically equivalent to the original (same interest/payoff-months output) before
+  committing to it. **Not yet re-verified against the actual failing prompt.**
