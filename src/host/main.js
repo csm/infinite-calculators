@@ -115,13 +115,31 @@ async function main() {
 
   // Polls at a fixed cadence rather than every animation frame (60Hz):
   // effects (sandbox install/compute/logic/generate round trips) already
-  // take tens of ms to seconds, so 100ms of added latency here is
-  // imperceptible, and a constant 60Hz eval() call into the interpreter --
-  // even when idle -- is real sustained CPU/memory pressure that mobile
-  // Safari's per-tab resource watchdog has been observed to crash-loop over
-  // ("A Problem Repeatedly Occurred") once real typing/dispatch! activity
-  // on the same Repl instance is layered on top of it.
-  const POLL_INTERVAL_MS = 100;
+  // take tens of ms to seconds, so added latency here is imperceptible,
+  // and a constant eval() call into the interpreter -- even when idle --
+  // is real sustained CPU/memory pressure that mobile Safari's per-tab
+  // resource watchdog has been observed to crash-loop over ("A Problem
+  // Repeatedly Occurred") once real typing/dispatch! activity on the same
+  // Repl instance is layered on top of it.
+  //
+  // Real-world finding, more serious than the above: a native DOM-event
+  // callback (a real click/keystroke, dispatched by cljrs.dom/listen!
+  // straight into this same Repl, doc/plan.md §3) firing while this poll
+  // loop's `repl.eval()` call is still in flight produces a Rust
+  // `RefCell` "already borrowed" panic, which aborts to the wasm
+  // "unreachable code" trap -- confirmed via a browser stack trace showing
+  // both. This means cljrs-wasm's `eval()` yields control back to the
+  // browser's event loop at some point before its Promise resolves (only
+  // way a DOM event could interleave with it at all, JS being single-
+  // threaded) while apparently holding a borrow across that yield --
+  // which is a bug in the interpreter's own async implementation, not
+  // something fixable from application code. Widening the poll interval
+  // only shrinks the window during which this app's own eval() calls can
+  // collide with a native one; it does not eliminate the race (a native
+  // dispatch! could still overlap a *result-reporting* eval() call after
+  // an effect completes, regardless of poll cadence). File upstream against
+  // cljrs-wasm if this needs a real fix.
+  const POLL_INTERVAL_MS = 500;
 
   async function tick() {
     try {

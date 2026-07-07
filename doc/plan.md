@@ -760,16 +760,24 @@ Open questions from milestone 3:
   **not yet re-verified on the actual device that hit the crash**. This doesn't resolve
   the more fundamental open question below, it just makes whatever's causing it much
   less frequent by cutting background Repl calls roughly 6x.
-- The main Repl's native DOM-event callback path (`cljrs.dom/listen!` → `dispatch!`,
-  §3) and JS-initiated `repl.eval()` calls (the effect-result poll loop, §7) both touch
-  the same Repl instance; §5's "a single Repl instance isn't safe to call `.eval()`
-  concurrently" finding was verified for the sandbox worker specifically, not the main
-  Repl. Generation streaming holds a `repl.eval()` call outstanding for a JS-network-
-  round-trip duration (seconds) on the *main* Repl, widening whatever window this
-  hazard has. Worth a dedicated verification pass (fire input events against the main
-  Repl while a generation is streaming, ideally on the iOS Safari build that crashed)
-  before relying on the mitigation above as a real fix rather than a probability
-  reduction.
+- ~~The main Repl's native DOM-event callback path... worth a dedicated verification
+  pass~~ — **confirmed real** (milestone 3, real-world): the "unreachable code" traps
+  turned out to have `already borrowed` in their stack trace -- a Rust `RefCell`
+  double-borrow panic (which aborts to wasm's `unreachable` trap), triggered by a real
+  browser interaction event. `cljrs.dom/listen!` → `dispatch!` (§3) and JS-initiated
+  `repl.eval()` calls (the effect-result poll loop, §7) do collide on the main Repl: a
+  native DOM event firing while an `eval()` call is still in flight on the same Repl
+  instance panics if that native call and the in-flight eval both try to borrow the
+  same interpreter state. This means `cljrs-wasm`'s `eval()` yields control back to the
+  browser's event loop at some point before its Promise resolves (the only way a DOM
+  event could interleave with it at all, JS being single-threaded) while apparently
+  holding a borrow across that yield -- **a bug in the interpreter's own async
+  implementation, not fixable from this codebase.** Mitigated, not fixed: the main
+  poll loop's interval was widened (100ms → 500ms, `src/host/main.js`) to shrink the
+  collision window; this reduces frequency but cannot eliminate the race, since a
+  native `dispatch!` can still overlap a *result-reporting* `eval()` call after any
+  effect completes (install/compute/logic/generate), independent of poll cadence.
+  **File this upstream against `cljrs-wasm`** — it's the only path to an actual fix.
 - No real hosted-model API key has been exercised against `proxy/providers/anthropic.mjs`
   or `proxy/providers/together.mjs` yet; the few-shot examples in `prompts/examples.json`
   are believed to stay within the §4 dialect subset but haven't been eval'd against the
