@@ -1,0 +1,25 @@
+[package]
+name = "infinite-calculators-wasm-shell"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Thin re-export crate. cljrs-wasm already defines everything wasm-bindgen needs
+# (the Repl/EvalResult classes); wasm-bindgen's binding info lives in custom
+# sections of the *compiled* wasm binary, so it survives being re-exported
+# through this crate and linked into our own cdylib. This crate exists only so
+# `wasm-pack` has a local package to build (it needs a real crate directory,
+# not just a crates.io dependency) and so the cljrs-wasm version is pinned
+# in one obvious place.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cljrs-wasm = "=0.1.219"
+
+# The sandboxed build environment used to develop this crate cannot reach the
+# binaryen release download that `wasm-pack`'s default `wasm-opt` step needs.
+# Disable it here; re-enable for a real production build once that's not a
+# constraint (or wire wasm-opt in as a separate CI step).
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
