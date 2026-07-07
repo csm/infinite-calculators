@@ -86,7 +86,7 @@ try {
     { timeout: 5000 },
   );
 
-  const [input] = await page.$$('.field input');
+  const [input] = await page.$$('.calculator-card .field input');
   await input.fill('5000');
   await input.dispatchEvent('input');
 

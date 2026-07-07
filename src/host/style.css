@@ -44,3 +44,40 @@ body {
   font-size: 1.1rem;
   margin: 0.25rem 0;
 }
+
+.generation-panel {
+  border: 1px solid #d0d0d0;
+  border-radius: 0.5rem;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.25rem;
+}
+
+.generation-panel .field input {
+  flex: 1;
+  width: auto;
+}
+
+.generation-actions {
+  margin-top: 0.5rem;
+}
+
+.generation-stream {
+  margin-top: 0.75rem;
+}
+
+.generation-partial {
+  max-height: 8rem;
+  overflow: auto;
+  background: #f5f5f5;
+  color: #888;
+  font-size: 0.8rem;
+  padding: 0.5rem;
+  border-radius: 0.25rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.generation-error {
+  margin-top: 0.75rem;
+  color: #a33;
+}

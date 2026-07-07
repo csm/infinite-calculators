@@ -38,6 +38,16 @@
                 :logic-request-id nil
                 :ui {:show-logic? false :show-source? false
                      :draft-source nil :source-error nil}}
+         ;; Milestone 3 (doc/plan.md §6): the describe -> generate -> validate
+         ;; -> (repair)* -> install pipeline. :status is :idle | :streaming |
+         ;; :installing | :error. :request-id tracks the in-flight :generate
+         ;; effect, :install-request-id the :install effect it triggers once
+         ;; a generation extracts and symbol-scans cleanly -- both exist so
+         ;; handle-effect-result! can tell a generation-triggered install
+         ;; apart from a manual source-edit apply (:calc :install-request-id).
+         :generation {:status :idle :description "" :partial-text ""
+                      :attempt 0 :request-id nil :install-request-id nil
+                      :last-source nil :error nil}
          :effects []
          :next-request-id 0}))
 
@@ -77,6 +87,46 @@
     (queue-effect! {:kind "logic" :request-id req-id :calc-id "main"
                      :inputs (get-in @app-state [:calc :inputs])
                      :outputs (get-in @app-state [:calc :outputs])})))
+
+(defn- queue-generate! [description attempt prior-source prior-error request-id]
+  (queue-effect!
+   (merge {:kind "generate" :request-id request-id :calc-id "main"
+           :description description :attempt attempt}
+          (when prior-source {:prior-source prior-source})
+          (when prior-error {:prior-error prior-error}))))
+
+(defn- start-generation! [description]
+  (let [req-id (next-request-id!)]
+    (swap! app-state assoc :generation
+           {:status :streaming :description description :partial-text ""
+            :attempt 1 :request-id req-id :install-request-id nil
+            :last-source nil :error nil})
+    (queue-generate! description 1 nil nil req-id)))
+
+(defn- retry-generation! [{:keys [description attempt last-source]} error-message]
+  (let [next-attempt (inc attempt)
+        req-id (next-request-id!)]
+    (swap! app-state update :generation merge
+           {:status :streaming :attempt next-attempt :request-id req-id
+            :install-request-id nil :partial-text "" :error nil})
+    (queue-generate! description next-attempt last-source error-message req-id)))
+
+(defn- give-up-generation! [message]
+  (swap! app-state update :generation merge {:status :error :error message}))
+
+(defn- handle-generation-failure!
+  "A generation attempt failed -- either the model's text didn't extract/
+  symbol-scan cleanly, the streaming request itself errored, or the
+  resulting source failed sandbox eval/validate/smoke-test. Repairs (doc/
+  plan.md §6) up to app.genpipe/max-attempts total attempts, then gives up
+  with a friendly, joined error message."
+  [error-message source]
+  (when source (swap! app-state assoc-in [:generation :last-source] source))
+  (let [gen (:generation @app-state)]
+    (if (app.genpipe/attempts-remaining? (:attempt gen))
+      (retry-generation! gen error-message)
+      (give-up-generation!
+       (str "Generation failed after " (:attempt gen) " attempts: " error-message)))))
 
 (defn dispatch!
   "Registered with replicant.dom/set-dispatch! in boot!. `event` is the map
@@ -125,6 +175,22 @@
       (swap! app-state assoc-in [:calc :ui :source-error] nil)
       (render!))
 
+    :generation/edit-description
+    (let [text (cljrs.dom/value (:replicant/node event))]
+      (swap! app-state assoc-in [:generation :description] text)
+      (render!))
+
+    :generation/submit
+    (do
+      (let [description (clojure.string/trim (or (get-in @app-state [:generation :description]) ""))]
+        (when (seq description) (start-generation! description)))
+      (render!))
+
+    :generation/dismiss-error
+    (do
+      (swap! app-state update :generation merge {:status :idle :error nil})
+      (render!))
+
     nil)
   nil)
 
@@ -136,25 +202,63 @@
   [{:keys [kind request-id ok] :as result}]
   (case kind
     "install"
-    (when (= request-id (get-in @app-state [:calc :install-request-id]))
-      (if ok
+    (let [gen (:generation @app-state)
+          from-generation? (= request-id (:install-request-id gen))
+          from-manual-edit? (= request-id (get-in @app-state [:calc :install-request-id]))]
+      (cond
+        (and ok (or from-generation? from-manual-edit?))
         (swap! app-state
                (fn [s]
-                 (-> s
-                     (assoc-in [:calc :source] (:source result))
-                     (assoc-in [:calc :spec] (:spec result))
-                     (assoc-in [:calc :inputs] (app.contract/defaults (:inputs (:spec result))))
-                     (assoc-in [:calc :outputs] (:outputs result))
-                     (assoc-in [:calc :steps] (:steps result))
-                     (assoc-in [:calc :status] :ready)
-                     (assoc-in [:calc :ui :source-error] nil)
-                     (assoc-in [:calc :ui :draft-source] nil))))
+                 (let [s (-> s
+                             (assoc-in [:calc :source] (:source result))
+                             (assoc-in [:calc :spec] (:spec result))
+                             (assoc-in [:calc :inputs] (app.contract/defaults (:inputs (:spec result))))
+                             (assoc-in [:calc :outputs] (:outputs result))
+                             (assoc-in [:calc :steps] (:steps result))
+                             (assoc-in [:calc :status] :ready)
+                             (assoc-in [:calc :ui :source-error] nil)
+                             (assoc-in [:calc :ui :draft-source] nil))]
+                   (if from-generation?
+                     (assoc s :generation {:status :idle :description "" :partial-text ""
+                                            :attempt 0 :request-id nil :install-request-id nil
+                                            :last-source nil :error nil})
+                     s))))
+
+        from-generation?
+        (handle-generation-failure! (app.genpipe/friendly-error (:errors result)) (:last-source gen))
+
+        from-manual-edit?
         (swap! app-state
                (fn [s]
                  (-> s
                      (assoc-in [:calc :status] (if (get-in s [:calc :spec]) :ready :error))
                      (assoc-in [:calc :ui :source-error]
-                               (clojure.string/join "; " (map :message (:errors result)))))))))
+                               (clojure.string/join "; " (map :message (:errors result)))))))
+
+        :else nil))
+
+    "generate-token"
+    (when (= request-id (get-in @app-state [:generation :request-id]))
+      (swap! app-state assoc-in [:generation :partial-text] (:partial-text result)))
+
+    "generate-done"
+    (when (= request-id (get-in @app-state [:generation :request-id]))
+      (let [source (app.genpipe/extract-source (:text result))
+            scan (app.contract/symbol-scan source)]
+        (if (:ok scan)
+          (let [install-req (next-request-id!)]
+            (swap! app-state
+                   (fn [s]
+                     (-> s
+                         (assoc-in [:generation :status] :installing)
+                         (assoc-in [:generation :last-source] source)
+                         (assoc-in [:generation :install-request-id] install-req))))
+            (queue-effect! {:kind "install" :request-id install-req :calc-id "main" :source source}))
+          (handle-generation-failure! (app.genpipe/friendly-error (:errors scan)) source))))
+
+    "generate-error"
+    (when (= request-id (get-in @app-state [:generation :request-id]))
+      (handle-generation-failure! (:message result) nil))
 
     "compute"
     (when (= request-id (get-in @app-state [:calc :compute-request-id]))
