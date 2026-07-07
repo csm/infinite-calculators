@@ -15,16 +15,34 @@ const REPLICANT_ORDER = [
 ].map((f) => join(root, 'vendor/replicant', `${f}.cljc`));
 
 const APP_ORDER = [
-  'render', 'core',
+  'json', 'contract', 'render', 'core',
 ].map((f) => join(root, 'src/app', `${f}.cljrs`));
 
-const parts = [...REPLICANT_ORDER, ...APP_ORDER].map((path) => {
-  const src = readFileSync(path, 'utf8');
-  return `;; ---- ${path.slice(root.length + 1)} ----\n${src}`;
-});
+// The sandbox bundle (evaluated into each per-calculator worker's own Repl,
+// see doc/plan.md §5) shares app.json/app.contract with the main bundle but
+// never loads core.async/cljrs.dom/replicant -- those namespaces simply
+// don't exist in a sandbox Repl, so a fully-qualified reference to one of
+// them fails with "no such namespace" regardless of ns refers. `sandbox.env`
+// is last so it's the active namespace -- and `calculator` resolves
+// unqualified, as the §4 contract requires -- when calculator source text
+// is eval'd.
+const SANDBOX_ORDER = [
+  join(root, 'src/app/json.cljrs'),
+  join(root, 'src/app/contract.cljrs'),
+  join(root, 'src/sandbox/protocol.cljrs'),
+  join(root, 'src/sandbox/env.cljrs'),
+];
+
+function writeBundle(paths, outPath) {
+  const parts = paths.map((path) => {
+    const src = readFileSync(path, 'utf8');
+    return `;; ---- ${path.slice(root.length + 1)} ----\n${src}`;
+  });
+  writeFileSync(outPath, parts.join('\n'));
+  console.log(`wrote ${outPath} (${parts.length} files, ${parts.join('\n').length} bytes)`);
+}
 
 const outDir = join(root, 'dist');
 mkdirSync(outDir, { recursive: true });
-const outPath = join(outDir, 'bundle.cljrs');
-writeFileSync(outPath, parts.join('\n'));
-console.log(`wrote ${outPath} (${parts.length} files, ${parts.join('\n').length} bytes)`);
+writeBundle([...REPLICANT_ORDER, ...APP_ORDER], join(outDir, 'bundle.cljrs'));
+writeBundle(SANDBOX_ORDER, join(outDir, 'sandbox-bundle.cljrs'));

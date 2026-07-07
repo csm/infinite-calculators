@@ -1,24 +1,51 @@
 (ns app.core)
-;; Bundling note: no `:require` for `app.render` here -- see vendor/replicant/NOTES.md
-;; and doc/plan.md §3. `app.render` is eval'd earlier in the bundle (build/bundle.mjs),
-;; so its vars are reachable by fully-qualified symbol without alias or require.
+;; Milestone 2: the calculator's :compute/:logic run in the sandbox worker
+;; (doc/plan.md §5), not as a local pure fn. Because this interpreter has no
+;; way for Clojure code to call back into JS on its own (§7 -- the only entry
+;; point into a Repl is JS calling .eval()), sandbox work is queued as data
+;; in :effects and drained by the JS host's poll loop (src/host/main.js),
+;; which performs it (via src/host/sandbox-manager.js) and reports the
+;; result back by eval'ing a call to handle-effect-result!.
+
+(def golden-calculator-source
+  "The milestone-1 tip calculator, rewritten to the real §4 contract:
+  installed at boot so the walking-skeleton UX now runs entirely through the
+  sandbox pipeline (install -> smoke-test -> compute -> logic) instead of an
+  in-main-Repl :compute."
+  "(calculator
+   {:title \"Tip calculator\"
+    :description \"Split a bill with a tip.\"
+    :inputs [{:id :bill :label \"Bill amount\" :type :number :default 50.0 :unit \"$\"}
+             {:id :tip-pct :label \"Tip %\" :type :number :default 18.0 :unit \"%\"}]
+    :outputs [{:id :tip :label \"Tip\" :format [:currency \"USD\"]}
+              {:id :total :label \"Total\" :format [:currency \"USD\"]}]
+    :compute (fn [{:keys [bill tip-pct]}]
+               (let [tip (* bill (/ tip-pct 100))]
+                 {:tip tip :total (+ bill tip)}))
+    :logic (fn [{:keys [bill tip-pct]} out]
+             [{:step \"Tip\" :formula \"bill * tip% / 100\" :value (:tip out)}
+              {:step \"Total\" :formula \"bill + tip\" :value (:total out)}])})")
 
 (def app-state
-  "Milestone-1 has exactly one hand-written calculator running in the main
-  Repl. Milestone 2 replaces the fixed :compute here with calculator specs
-  installed into the sandbox worker (doc/plan.md §4-5)."
-  (atom {:inputs {:bill 50.0 :tip-pct 18.0}
-         :outputs nil}))
+  (atom {:calc {:source golden-calculator-source
+                :status :installing        ; :installing | :ready | :error
+                :spec nil                  ; {:title :description :inputs :outputs}
+                :inputs {}
+                :outputs {}
+                :steps []
+                :install-request-id nil
+                :compute-request-id nil
+                :logic-request-id nil
+                :ui {:show-logic? false :show-source? false
+                     :draft-source nil :source-error nil}}
+         :effects []
+         :next-request-id 0}))
 
-(defn compute [{:keys [bill tip-pct]}]
-  (let [tip (* bill (/ tip-pct 100))]
-    {:tip tip :total (+ bill tip)}))
+(defn- next-request-id! []
+  (:next-request-id (swap! app-state update :next-request-id inc)))
 
-(defn recompute! []
-  (swap! app-state
-         (fn [state] (assoc state :outputs (compute (:inputs state))))))
-
-(recompute!)
+(defn- queue-effect! [effect]
+  (swap! app-state update :effects conj effect))
 
 (def root-el
   "Set by boot!; holds the DOM element replicant.dom/render mounts into."
@@ -28,24 +55,122 @@
   (when-let [el @root-el]
     (replicant.dom/render el (app.render/view @app-state))))
 
+(defn take-effects!
+  "Called by the JS host's poll loop once per tick (see main.js) -- this
+  interpreter has no way for Clojure code to reach out to JS on its own
+  (§7), so effects are collected here instead of pushed. Returns a JSON
+  string (an array, possibly empty) and clears the queue."
+  []
+  (let [effects (:effects @app-state)]
+    (swap! app-state assoc :effects [])
+    (app.json/->json effects)))
+
+(defn- queue-compute! []
+  (let [req-id (next-request-id!)]
+    (swap! app-state assoc-in [:calc :compute-request-id] req-id)
+    (queue-effect! {:kind "compute" :request-id req-id :calc-id "main"
+                     :inputs (get-in @app-state [:calc :inputs])})))
+
+(defn- queue-logic! []
+  (let [req-id (next-request-id!)]
+    (swap! app-state assoc-in [:calc :logic-request-id] req-id)
+    (queue-effect! {:kind "logic" :request-id req-id :calc-id "main"
+                     :inputs (get-in @app-state [:calc :inputs])
+                     :outputs (get-in @app-state [:calc :outputs])})))
+
 (defn dispatch!
   "Registered with replicant.dom/set-dispatch! in boot!. `event` is the map
   replicant.core/build-event-map produces (carries :replicant/node, the DOM
-  node the handler fired on); `action` is the hiccup :on data, e.g.
-  [:set-input :bill]."
+  node the handler fired on); `action` is the hiccup :on data."
   [event action]
   (case (first action)
     :set-input
     (let [field (second action)
           raw (cljrs.dom/value (:replicant/node event))
-          n (parse-double raw)]
-      (swap! app-state assoc-in [:inputs field] (or n 0))
-      (recompute!)
+          input-spec (first (filter #(= (:id %) field) (get-in @app-state [:calc :spec :inputs])))
+          parsed (if (#{:number :integer} (:type input-spec)) (or (parse-double raw) 0) raw)]
+      (swap! app-state assoc-in [:calc :inputs field] parsed)
+      (queue-compute!)
       (render!))
+
+    :toggle-logic
+    (do
+      (swap! app-state update-in [:calc :ui :show-logic?] not)
+      (when (get-in @app-state [:calc :ui :show-logic?]) (queue-logic!))
+      (render!))
+
+    :toggle-source
+    (do
+      (swap! app-state update-in [:calc :ui :show-source?] not)
+      (when (nil? (get-in @app-state [:calc :ui :draft-source]))
+        (swap! app-state assoc-in [:calc :ui :draft-source] (get-in @app-state [:calc :source])))
+      (render!))
+
+    :edit-source
+    (let [text (cljrs.dom/value (:replicant/node event))]
+      (swap! app-state assoc-in [:calc :ui :draft-source] text)
+      (render!))
+
+    :apply-source
+    (let [draft (get-in @app-state [:calc :ui :draft-source])
+          req-id (next-request-id!)]
+      (swap! app-state assoc-in [:calc :install-request-id] req-id)
+      (swap! app-state assoc-in [:calc :status] :installing)
+      (queue-effect! {:kind "install" :request-id req-id :calc-id "main" :source draft})
+      (render!))
+
+    :revert-source
+    (do
+      (swap! app-state assoc-in [:calc :ui :draft-source] (get-in @app-state [:calc :source]))
+      (swap! app-state assoc-in [:calc :ui :source-error] nil)
+      (render!))
+
     nil)
   nil)
+
+(defn handle-effect-result!
+  "Called by the JS host after it has performed an effect (sandbox install/
+  compute/logic) -- see main.js. `result` is plain Clojure data by the time
+  this runs (the JS host builds the call's source text from the sandbox's
+  JSON reply, see src/host/edn.js), so no parsing happens here."
+  [{:keys [kind request-id ok] :as result}]
+  (case kind
+    "install"
+    (when (= request-id (get-in @app-state [:calc :install-request-id]))
+      (if ok
+        (swap! app-state
+               (fn [s]
+                 (-> s
+                     (assoc-in [:calc :source] (:source result))
+                     (assoc-in [:calc :spec] (:spec result))
+                     (assoc-in [:calc :inputs] (app.contract/defaults (:inputs (:spec result))))
+                     (assoc-in [:calc :outputs] (:outputs result))
+                     (assoc-in [:calc :steps] (:steps result))
+                     (assoc-in [:calc :status] :ready)
+                     (assoc-in [:calc :ui :source-error] nil)
+                     (assoc-in [:calc :ui :draft-source] nil))))
+        (swap! app-state
+               (fn [s]
+                 (-> s
+                     (assoc-in [:calc :status] (if (get-in s [:calc :spec]) :ready :error))
+                     (assoc-in [:calc :ui :source-error]
+                               (clojure.string/join "; " (map :message (:errors result)))))))))
+
+    "compute"
+    (when (= request-id (get-in @app-state [:calc :compute-request-id]))
+      (when ok (swap! app-state assoc-in [:calc :outputs] (:outputs result))))
+
+    "logic"
+    (when (= request-id (get-in @app-state [:calc :logic-request-id]))
+      (when ok (swap! app-state assoc-in [:calc :steps] (:steps result))))
+
+    nil)
+  (render!))
 
 (defn boot! []
   (replicant.dom/set-dispatch! dispatch!)
   (reset! root-el (cljrs.dom/by-id "app"))
+  (let [req-id (next-request-id!)]
+    (swap! app-state assoc-in [:calc :install-request-id] req-id)
+    (queue-effect! {:kind "install" :request-id req-id :calc-id "main" :source golden-calculator-source}))
   (render!))

@@ -1,0 +1,58 @@
+(ns sandbox.protocol)
+;; Op handlers the worker host (src/host/sandbox-worker.js) calls into via
+;; repl.eval, one call per op (doc/plan.md §5). Every function here returns a
+;; JSON string -- app.contract/app.json are the only cross-boundary contract,
+;; :compute/:logic closures themselves never leave this Repl.
+
+(def state
+  "The live spec map (real :compute/:logic fns) of whichever calculator is
+  currently installed in this worker. One worker hosts exactly one
+  calculator -- see doc/plan.md §5's revised architecture note."
+  (atom nil))
+
+(defn check-source
+  "Symbol-scans `source` without evaluating it (doc/plan.md §6 stage 2).
+  Called before the worker host actually evals the source as code."
+  [source]
+  (app.json/->json (select-keys (app.contract/symbol-scan source) [:ok :errors])))
+
+(defn finish-install!
+  "Called immediately after the worker host has itself eval'd
+  `(def installed-calc <source>)` -- see sandbox-worker.js -- passing the
+  resulting live spec value. Validates + smoke-tests it (doc/plan.md §6
+  stages 4/5); on success stores it in `state` and returns only the data
+  parts (the running spec's :compute/:logic never cross to JSON)."
+  [spec]
+  (let [validation (app.contract/validate-spec spec)]
+    (if-not (:ok validation)
+      (app.json/->json {:ok false :errors (:errors validation)})
+      (let [smoke (app.contract/smoke-test spec)]
+        (if-not (:ok smoke)
+          (app.json/->json {:ok false :errors (:errors smoke)})
+          (do
+            (reset! state spec)
+            (app.json/->json
+             {:ok true
+              :spec (select-keys spec [:title :description :inputs :outputs])
+              :outputs (:outputs smoke)
+              :steps (:steps smoke)})))))))
+
+(defn compute!
+  "Runs the installed calculator's :compute on `inputs` (doc/plan.md §5)."
+  [inputs]
+  (if-let [spec @state]
+    (let [result (try {:value ((:compute spec) inputs)} (catch :default e {:error e}))]
+      (if (:error result)
+        (app.json/->json {:ok false :errors [{:message (str ":compute threw: " (ex-message (:error result)))}]})
+        (app.json/->json {:ok true :outputs (:value result)})))
+    (app.json/->json {:ok false :errors [{:message "no calculator installed"}]})))
+
+(defn logic!
+  "Runs the installed calculator's :logic on `inputs`/`outputs`."
+  [inputs outputs]
+  (if-let [spec @state]
+    (let [result (try {:value ((:logic spec) inputs outputs)} (catch :default e {:error e}))]
+      (if (:error result)
+        (app.json/->json {:ok false :errors [{:message (str ":logic threw: " (ex-message (:error result)))}]})
+        (app.json/->json {:ok true :steps (:value result)})))
+    (app.json/->json {:ok false :errors [{:message "no calculator installed"}]})))

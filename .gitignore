@@ -2,3 +2,4 @@
 /build/wasm-shell/target/
 /build/wasm-shell/pkg/
 /node_modules/
+/deploy/
