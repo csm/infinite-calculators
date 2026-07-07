@@ -1,0 +1,16 @@
+{
+  "name": "infinite-calculators",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:wasm": "./build/build-wasm.sh",
+    "bundle": "node build/bundle.mjs",
+    "build": "npm run build:wasm && npm run bundle",
+    "dev": "npm run bundle && npx --yes http-server . -p 8080 -c-1",
+    "test:e2e": "node test/e2e/walking-skeleton.mjs"
+  },
+  "devDependencies": {
+    "http-server": "^14.1.1",
+    "playwright": "^1.56.1"
+  }
+}

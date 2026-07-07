@@ -10,12 +10,19 @@ running either **in-browser via WebLLM** or on a **hosted model** the user can o
 
 ## 0. Reference projects and known state
 
-| Project | Where | State (as of 2026-07-03) |
+| Project | Where | State (as of 2026-07-07) |
 |---|---|---|
 | Clojurust | github.com/csm/clojurust · docs.clj.rs | Tiered runtime (tree-walk → IR → Cranelift JIT, AOT to native). 25+ crates under the `cljrs-` prefix. 880+ tests; phases 1–12 largely complete. EPL licensed. |
-| cljrs-wasm | crates.io `cljrs-wasm` 0.1.204 (2026-07-02) | Browser runtime via wasm-bindgen. Exposes a `Repl` class: `new Repl()`, async `eval(code) → Promise<EvalResult>` with `output()`, `result()` (stringified), `is_error()`. Full core.async (no blocking ops — no threads in wasm). Interpreter-only in wasm (no IR/JIT/compiled modes), no filesystem, no Rust FFI, **no DOM access yet**. |
+| cljrs-wasm | crates.io `cljrs-wasm` 0.1.219 (2026-07-06) | Browser runtime via wasm-bindgen. Exposes a `Repl` class: `new Repl()`, async `eval(code) → Promise<EvalResult>` with `output()`, `result()` (stringified), `is_error()`. Full core.async (no blocking ops — no threads in wasm). Interpreter-only in wasm, no filesystem, no Rust FFI. **DOM access confirmed working**: `Repl::new()` natively registers a `cljrs.dom` namespace (via the `cljrs-dom` crate) exposing selection/creation/tree/attribute/class/content/style/event/hiccup primitives directly on real browser DOM nodes — verified end-to-end in a live Chromium session (see below). |
 | replicant (upstream) | github.com/cjohansen/replicant | Stable, feature-complete, zero-dependency hiccup→DOM renderer, v2026.06.2. |
-| replicant (cljrs port) | github.com/csm/replicant, branch `claude/replicant-clojurust-wasm-lo6a5f` | `:rust` renderer backend added; pure-data components pass under cljrs CI. Needs a **cljrs-dom** backend implementation (requirements documented in-branch). Known blockers: `extend-via-metadata` across namespaces, `WrongType` errors in attribute prep/apply, missing core fns in current cljrs (`declare`, `run!`, `some->>`; `unchecked-int` absent). |
+| replicant (cljrs port) | github.com/csm/replicant, `main` | `:rust` renderer backend (`replicant.dom/create-renderer`, `render`, `set-dispatch!`) is complete and merged to main. **Verified working against cljrs-wasm 0.1.219**: initial render, diffed re-render (attribute and text-child updates), and real DOM click events dispatching back into a Clojurust `*dispatch*` function all work in a live browser session (see `doc/cljrs-port/` for the harness). One interpreter bug found and worked around (below); no other blockers hit. |
+
+**Verification performed this session**: built a throwaway Rust crate depending on `cljrs-wasm = "0.1.219"` (`pub use cljrs_wasm::*;` is enough — wasm-bindgen's custom sections survive re-export across the crate boundary), `wasm-pack build --target web` it (needs `wasm-opt = false` in `[package.metadata.wasm-pack.profile.release]`, since the sandboxed build environment can't reach the binaryen release download), served it, and drove a real Chromium instance via Playwright to eval Clojurust code against a live `Repl`. Confirmed: `cljrs.dom` primitives work directly; the full `replicant.dom` bundle (vendored under `vendor/replicant/`, see below) evaluates cleanly; `replicant.dom/render` mounts, diffs, and updates real DOM; `:on {:click [...]}` handlers fire through `replicant.dom/set-dispatch!` on real `click()` events.
+
+Two concrete findings from that verification, both now load-bearing for how code is bundled/written in this project:
+
+1. **`:require` cannot resolve a sibling namespace that only exists because its `(ns ...)` form was `eval`'d earlier in the same session.** cljrs-wasm's `Repl` has no filesystem/source-path, so `require` always falls through to a source-file loader lookup and fails with `Could not find namespace ... on source path` — even for namespaces we ourselves defined and fully evaluated moments earlier (this is *not* limited to natively-registered namespaces like `cljrs.dom`, as originally assumed). The fix, used throughout the vendored `replicant.*` bundle and to be used in our own `.cljrs` sources: replace intra-bundle `:require` clauses with `(alias 'x 'the.other.ns)` calls after the `ns` form. `:require` for genuine embedded stdlib namespaces (`clojure.string`, `clojure.walk`, confirmed present) works normally. This changes how §10's file layout is bundled — see the updated §3.
+2. **`reify` method-parameter shadowing bug**: a `reify` method whose parameter is named the same as the protocol method itself (e.g. `(replace-child [this el insert-child replace-child] ...)`) does not shadow correctly — the body resolves the *outer* protocol fn/var, not the local binding, producing `WrongType: expected DomNode, got fn`. Worked around in the vendored `replicant.dom` by renaming the shadowing parameter. Filed as an upstream cljrs issue; not a blocker since the workaround is a one-line rename at each call site that needs it.
 
 Facts above that shape this plan:
 
@@ -25,10 +32,14 @@ Facts above that shape this plan:
    is evaluated in, not compiled-vs-interpreted.
 2. **The JS boundary is string-shaped.** `EvalResult.result()` returns a stringified
    value. Structured JS↔cljrs data exchange (EDN/JSON marshalling, JS→cljrs callbacks)
-   is thin today and is a named workstream (§7).
-3. **No DOM access from cljrs yet.** The replicant port's missing piece is a `cljrs-dom`
-   backend; providing it (or the data-driven alternative in §3) is on this project's
-   critical path.
+   is thin today and is a named workstream (§7). This mostly matters for the sandbox
+   worker protocol and LLM streaming now — rendering and UI event dispatch happen
+   entirely inside the main Repl (see §3) and never need to cross the JS boundary per
+   keystroke/click.
+3. **DOM access from cljrs works**, via the natively-registered `cljrs.dom` namespace
+   and the ported `replicant.dom` (`:rust` backend), both verified above. The two-phase
+   rendering plan originally in this document (data-driven DOM effector, then a Phase B
+   replicant swap) is **no longer necessary — go straight to replicant** (§3).
 4. **No fuel/step limits in the interpreter.** Sandboxing untrusted code instead uses a
    dedicated Repl instance in a **Web Worker with a watchdog timeout** (§5) — worker
    termination is the enforcement mechanism the platform already gives us. Interpreter
@@ -159,28 +170,38 @@ Recompute path: input event → validate/coerce input → send `{:op :compute :c
 Compute failures surface on the card without destroying it. Because sandbox eval is
 async, cards show a stale-output shimmer for the (normally imperceptible) round-trip.
 
-### Rendering backend: two-phase plan
+### Rendering backend: replicant, directly
 
-The replicant cljrs port has a `:rust` renderer backend whose pure-data layers pass CI,
-but it needs a **cljrs-dom** backend and is currently blocked on interpreter issues
-(`extend-via-metadata` across namespaces, attribute `WrongType` errors). Rather than
-gate the whole project on that:
+`cljrs-dom` and the replicant `:rust` backend both work today (verified in §0) — there
+is no need for a data-driven DOM-op effector as a stopgap. The app's render layer is a
+plain `(render app-state) → hiccup` function; rendering and updates go straight through
+`replicant.dom/render`, called from the main Repl on every state change:
 
-- **Phase A (launch): data-driven DOM effector.** The app's render layer produces
-  hiccup; a small pure Clojurust differ produces a flat list of DOM operations
-  (`[[:create-element id :div {...}] [:set-text id "…"] [:listen id :input [:calc/set-input …]] …]`)
-  returned to the JS shell, which applies them and routes events back as data. This
-  keeps *all* logic in Clojurust and needs only the string-shaped eval boundary that
-  exists today. Calculator UIs are small trees; a simple keyed differ (or even
-  card-granularity re-render) is fine.
-- **Phase B: replicant proper.** Implement `cljrs-dom` against the requirements
-  documented in the port branch, help land the interpreter fixes upstream, and swap the
-  effector for replicant's `:rust` backend behind the same
-  `(mount! el)` / `(render! el hiccup)` protocol. Views don't change — they're hiccup
-  either way.
+```clojure
+(replicant.dom/render root-el (render @app-state))
+```
 
-Phase A's differ and op vocabulary should deliberately mirror what `cljrs-dom` needs,
-so Phase A work *is* groundwork for the port rather than throwaway.
+Events are wired the same way replicant does it everywhere: hiccup carries
+`[:on {:click [:calc/set-input calc-id :rate]} ...]`-style data handlers, and
+`(replicant.dom/set-dispatch! f)` is set once at boot to a function that receives
+`(event action)` and applies the action to `app-state` (then re-renders). Because
+`cljrs.dom/listen!` registers the callback natively and invokes it inside the same Repl,
+**no event ever needs to cross the JS boundary** — the JS shell's only job is booting
+the wasm module, evaling the bundled sources once, and handling the few things cljrs
+genuinely cannot do itself (WebLLM, `fetch`, `localStorage`, worker management — §7).
+
+Rendering therefore needs no protocol of its own distinct from replicant's; `render.cljrs`
+just returns hiccup, same as any replicant app. The former Phase A/B split is gone —
+milestone 5 in §12 is replaced by "wire the calculator card views to replicant" as part
+of the walking skeleton (milestone 1), not a parallel late-stage workstream.
+
+**Vendoring note**: cljrs-wasm ships no package manager reachable from the browser
+build, so replicant's `.cljc` sources needed for the `:rust` backend are vendored
+directly into this repo under `vendor/replicant/` (pinned to the upstream commit noted
+in `vendor/replicant/NOTES.md`), patched per the two findings in §0 (`alias` instead of
+intra-bundle `:require`; the `replace-child` param rename). Re-vendoring on a replicant
+update means re-applying both patches — `vendor/replicant/NOTES.md` documents the exact
+diff so this is mechanical.
 
 ---
 
@@ -353,12 +374,16 @@ no registered-callback mechanism documented.
 
 Consequences and plan:
 
-- **EDN-over-strings everywhere.** All shell↔Repl traffic is EDN text: the shell calls
-  `repl.eval("(app/handle-event! \"[:calc/set-input …]\")")` (event as EDN string,
-  reader-parsed inside), and reads effect requests back as the eval's result string
-  (`pr-str` of `{:effects [[:dom-ops […]] [:llm-generate {…}] …]}`). One generic
-  `dispatch!(edn-string) → effects-edn` entry point keeps the JS glue dumb and the
-  protocol testable from pure Clojurust.
+- **DOM rendering and UI events don't cross this boundary at all** (§3) — they're
+  handled entirely inside the main Repl via `replicant.dom`/`cljrs.dom`, verified
+  working in §0. What's left needing the JS boundary is genuinely JS-only: WebLLM,
+  `fetch`, `localStorage`, and the sandbox worker's `postMessage` protocol (§5).
+- **EDN-over-strings for what remains.** Shell↔Repl traffic for those effects is EDN
+  text: the shell calls `repl.eval("(app/handle-effect! \"[:llm-generate {…}] \")")`
+  (as an EDN string, reader-parsed inside), and reads further effect requests back as
+  the eval's result string (`pr-str` of `{:effects [[:llm-generate {…}] [:storage-read …]
+  …]}`). One generic `dispatch!(edn-string) → effects-edn` entry point keeps the JS glue
+  dumb and the protocol testable from pure Clojurust.
 - **Async results ride core.async.** Effects that complete later (LLM tokens, worker
   replies, storage reads) re-enter via the same `dispatch!` with a completion event.
   WebLLM's token callback becomes a stream of `[:gen/token "…"]` dispatches (batched
@@ -434,10 +459,11 @@ storage eviction), offer one-click switch to hosted rather than failing the gene
 
 ```
 /doc/plan.md                  this document
+/vendor/replicant/            vendored replicant .cljc sources for the :rust backend,
+                              patched for cljrs-wasm bundling (see NOTES.md, §3)
 /src/app/                     Clojurust app core (.cljrs, eval'd into main Repl at boot)
   core.cljrs                  entry, state atom, event loop, dispatch!/effects protocol
   render.cljrs                views (hiccup): home, calculator card, logic/source panels
-  dom.cljrs                   Phase A hiccup differ → DOM-op lists (§3)
   contract.cljrs              calculator spec + validator + symbol scan + formatters
   genpipe.cljrs               generation orchestration, prompts, repair loop
   backend.cljrs               ModelBackend protocol + webllm/hosted impls
@@ -445,14 +471,22 @@ storage eviction), offer one-click switch to hosted rather than failing the gene
 /src/sandbox/                 sources eval'd into the sandbox Repl (worker side)
   env.cljrs                   allowlist env construction, calculator constructor
   protocol.cljrs              install/compute/logic op handlers
-/src/host/                    JS shell: cljrs-wasm boot, worker mgmt, DOM effector,
+/src/host/                    JS shell: cljrs-wasm boot, bundle eval, worker mgmt,
                               webllm glue, editor mount, storage/fetch effects
+/build/wasm-shell/            thin Rust crate (`cljrs-wasm` dependency, pinned version)
+                              wasm-pack'd to produce the Repl bindings; see §0 for the
+                              `wasm-opt = false` build note
 /proxy/                       hosted-model API proxy (serverless function)
 /prompts/                     system prompt + few-shot examples (data, versioned)
 /test/                        unit tests + golden calculators + generation eval suite
-/build/                       source-bundle build (order + concat .cljrs), dev server,
-                              cljrs version pin
+/build/                       source-bundle build (order + concat .cljrs, alias-patched
+                              per §3), dev server, cljrs version pin
 ```
+
+Every `.cljrs` file bundled into a Repl this way (app, sandbox, and vendored replicant
+alike) follows the §3 bundling rule: only `ns`-form-per-file plus `(alias 'x 'y)` for
+sibling namespaces already brought into existence earlier in the same bundle, never
+`:require` for them. `:require` is reserved for genuine embedded stdlib namespaces.
 
 ---
 
@@ -480,10 +514,11 @@ storage eviction), offer one-click switch to hosted rather than failing the gene
 
 ## 12. Milestones
 
-1. **Walking skeleton** — shell boots cljrs-wasm, evals bundled app sources into the
-   main Repl; `dispatch!` round-trip works; Phase A DOM effector renders a hand-written
-   calculator map; inputs recompute outputs (in-main-Repl for now). *Proves the
-   boot/eval/effects/rendering stack before any sandbox or LLM work.*
+1. **Walking skeleton** — shell boots cljrs-wasm, evals the vendored replicant bundle
+   plus bundled app sources into the main Repl; `replicant.dom/render` renders a
+   hand-written calculator's hiccup and `set-dispatch!` wires input/click events back
+   into an app-state atom; inputs recompute outputs (in-main-Repl for now). *Proves the
+   boot/eval/render/dispatch stack before any sandbox or LLM work.*
 2. **Sandbox + contract** — sandbox Repl in a worker with the §5 protocol and watchdog;
    allowlist env; validator + symbol scan + smoke test; textarea source editing with
    apply/revert. *The app is now fully useful with pasted code.*
@@ -491,13 +526,9 @@ storage eviction), offer one-click switch to hosted rather than failing the gene
    logic panel. *First end-to-end "describe → calculator" moment.*
 4. **WebLLM backend** — model download UX, backend picker, eval suite to pick the
    default model, tune prompts/repair for the small model.
-5. **Replicant swap (Phase B)** — implement `cljrs-dom` per the port branch's
-   documented requirements, pick up interpreter fixes as cljrs releases land, swap the
-   Phase A effector for replicant's `:rust` backend behind the renderer protocol.
-   *Runs in parallel with 3–4; not on the launch critical path.*
-6. **Polish** — CodeMirror editor, library/persistence, share links, refine prompts,
+5. **Polish** — CodeMirror editor, library/persistence, share links, refine prompts,
    edited-badge/diff, trust framing, mobile layout.
-7. **Hardening** — allowlist/watchdog audit, rate limiting on the proxy, generation
+6. **Hardening** — allowlist/watchdog audit, rate limiting on the proxy, generation
    eval regression run, cross-browser (WebGPU matrix) pass, wasm size budget
    (interpreter + embedded IR bundles; measure at milestone 1, wasm-opt + brotli).
 
@@ -507,10 +538,10 @@ storage eviction), offer one-click switch to hosted rather than failing the gene
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| cljrs stdlib gaps / fast-moving releases (`declare`, `run!`, `some->>` recently missing; 0.1.194→204 in weeks) | Generated & app code breaks on version bumps | Pin cljrs-wasm; golden-calculator suite as re-pin gate; banned-forms list in prompt + symbol scan |
-| `extend-via-metadata` cross-namespace bug, attribute `WrongType` errors (replicant port blockers) | Blocks Phase B rendering | Phase A data-driven DOM effector ships first; replicant swap is off the critical path |
-| No DOM access from cljrs-wasm | Blocks any in-Repl rendering | Phase A effector needs only string eval; `cljrs-dom` is the tracked Phase B dependency |
-| String-only eval results | Clunky interop, perf overhead | EDN-over-strings protocol (§7); batch event dispatches; upstream structured-result request |
+| cljrs stdlib gaps / fast-moving releases (`declare`, `run!`, `some->>` recently missing; 0.1.194→219 in days) | Generated & app code breaks on version bumps | Pin cljrs-wasm; golden-calculator suite as re-pin gate; banned-forms list in prompt + symbol scan |
+| `:require` cannot load a sibling namespace defined only by an earlier `eval` in the same session (no filesystem/source-path in cljrs-wasm) | Breaks any multi-namespace `.cljrs` bundle written with normal `:require` | Verified fix: use `(alias 'x 'y)` for intra-bundle namespace references instead of `:require` (§3); applies to app/sandbox/vendored-replicant sources alike |
+| `reify` method-parameter-shadows-protocol-method-name interpreter bug | Silent `WrongType` errors in any `reify` whose param name collides with the method name | Verified workaround: rename the shadowing parameter (done in vendored `replicant.dom`); file upstream; watch for the same pattern in new code |
+| String-only eval results | Clunky interop, perf overhead, but now only affects the (smaller) surface left after §3 — sandbox worker + LLM/storage/fetch effects | EDN-over-strings protocol (§7); batch event dispatches; upstream structured-result request |
 | No interpreter fuel limits | Runaway generated code | Worker + watchdog kill/respawn (§5); upstream fuel request is nice-to-have |
 | Small WebLLM models produce invalid contracts | Poor in-browser UX | Tight contract, few-shot, repair loop, eval-driven model choice; hosted as default |
 | Wasm binary size (interpreter + IR bundles) | Slow first load | Measure at milestone 1; wasm-opt, brotli, lazy-load webllm |

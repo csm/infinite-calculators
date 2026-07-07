@@ -1,0 +1,51 @@
+(ns app.core)
+;; Bundling note: no `:require` for `app.render` here -- see vendor/replicant/NOTES.md
+;; and doc/plan.md §3. `app.render` is eval'd earlier in the bundle (build/bundle.mjs),
+;; so its vars are reachable by fully-qualified symbol without alias or require.
+
+(def app-state
+  "Milestone-1 has exactly one hand-written calculator running in the main
+  Repl. Milestone 2 replaces the fixed :compute here with calculator specs
+  installed into the sandbox worker (doc/plan.md §4-5)."
+  (atom {:inputs {:bill 50.0 :tip-pct 18.0}
+         :outputs nil}))
+
+(defn compute [{:keys [bill tip-pct]}]
+  (let [tip (* bill (/ tip-pct 100))]
+    {:tip tip :total (+ bill tip)}))
+
+(defn recompute! []
+  (swap! app-state
+         (fn [state] (assoc state :outputs (compute (:inputs state))))))
+
+(recompute!)
+
+(def root-el
+  "Set by boot!; holds the DOM element replicant.dom/render mounts into."
+  (atom nil))
+
+(defn render! []
+  (when-let [el @root-el]
+    (replicant.dom/render el (app.render/view @app-state))))
+
+(defn dispatch!
+  "Registered with replicant.dom/set-dispatch! in boot!. `event` is the map
+  replicant.core/build-event-map produces (carries :replicant/node, the DOM
+  node the handler fired on); `action` is the hiccup :on data, e.g.
+  [:set-input :bill]."
+  [event action]
+  (case (first action)
+    :set-input
+    (let [field (second action)
+          raw (cljrs.dom/value (:replicant/node event))
+          n (parse-double raw)]
+      (swap! app-state assoc-in [:inputs field] (or n 0))
+      (recompute!)
+      (render!))
+    nil)
+  nil)
+
+(defn boot! []
+  (replicant.dom/set-dispatch! dispatch!)
+  (reset! root-el (cljrs.dom/by-id "app"))
+  (render!))

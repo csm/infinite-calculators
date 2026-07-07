@@ -1,0 +1,33 @@
+(ns app.render)
+
+(defn round2 [x]
+  (when x (/ (Math/round (* x 100)) 100.0)))
+
+(defn number-input [{:keys [id label value unit]}]
+  [:label {:class "field"}
+   [:span {:class "field-label"} label]
+   [:input {:type "number"
+            :value value
+            :on {:input [:set-input id]}}]
+   (when unit [:span {:class "field-unit"} unit])])
+
+(defn output-row [{:keys [label value unit]}]
+  [:div {:class "output-row"}
+   [:span {:class "output-label"} label]
+   [:span {:class "output-value"} (str (round2 value) unit)]])
+
+(defn view
+  "Pure function from app-state to hiccup. No DOM access here -- rendering and
+  event dispatch both happen outside this namespace (app.core)."
+  [{:keys [inputs outputs]}]
+  [:div {:class "calculator-card"}
+   [:h1 "Tip calculator"]
+   [:p {:class "calculator-description"}
+    "Milestone-1 walking skeleton: a hand-written calculator proving
+     boot -> eval -> render -> dispatch -> recompute, end to end."]
+   [:div {:class "inputs"}
+    (number-input {:id :bill :label "Bill amount" :value (:bill inputs) :unit "$"})
+    (number-input {:id :tip-pct :label "Tip %" :value (:tip-pct inputs) :unit "%"})]
+   [:div {:class "outputs"}
+    (output-row {:label "Tip" :value (:tip outputs) :unit "$"})
+    (output-row {:label "Total" :value (:total outputs) :unit "$"})]])
