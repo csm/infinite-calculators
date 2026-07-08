@@ -142,8 +142,13 @@
             bad-numeric (->> outputs
                               (filter #(numeric-formats (first (:format %))))
                               (map :id)
+                              ;; (* 1.0 v) for the same reason as as-double
+                              ;; below: finite? is float/double-specific, and
+                              ;; a *ratio* value (exact integer math that
+                              ;; didn't divide evenly, e.g. 9/50) is finite by
+                              ;; construction but fails a float-only check.
                               (remove #(let [v (get out %)]
-                                         (and (number? v) (or (integer? v) (finite? v))))))]
+                                         (and (number? v) (or (integer? v) (finite? (* 1.0 v)))))))]
         (cond
           (seq missing)
           {:ok false :errors [{:message (str ":compute result missing outputs: " (vec missing))}]}

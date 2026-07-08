@@ -37,11 +37,28 @@
               :outputs (:outputs smoke)
               :steps (:steps smoke)})))))))
 
+(defn- coerce-number-inputs
+  "Forces every :number-declared input to a double before calculator code
+  sees it. Values arrive over the JSON boundary type-degraded -- JSON has no
+  int/double distinction, so 1.0 crosses as 1 and comes back an integer --
+  and integer inputs push Clojure's exact arithmetic into ratios (9/50) that
+  can't cross back out as JSON, while native math fns handed an unexpected
+  integer have panicked outright before (see app.contract's as-double note).
+  :integer/:select inputs keep their declared types."
+  [spec inputs]
+  (reduce (fn [m {:keys [id type]}]
+            (if (and (= type :number) (number? (get m id)))
+              (update m id #(* 1.0 %))
+              m))
+          inputs
+          (:inputs spec)))
+
 (defn compute!
   "Runs the installed calculator's :compute on `inputs` (doc/plan.md §5)."
   [inputs]
   (if-let [spec @state]
-    (let [result (try {:value ((:compute spec) inputs)} (catch :default e {:error e}))]
+    (let [inputs (coerce-number-inputs spec inputs)
+          result (try {:value ((:compute spec) inputs)} (catch :default e {:error e}))]
       (if (:error result)
         (app.json/->json {:ok false :errors [{:message (str ":compute threw: " (ex-message (:error result)))}]})
         (app.json/->json {:ok true :outputs (:value result)})))
@@ -51,7 +68,8 @@
   "Runs the installed calculator's :logic on `inputs`/`outputs`."
   [inputs outputs]
   (if-let [spec @state]
-    (let [result (try {:value ((:logic spec) inputs outputs)} (catch :default e {:error e}))]
+    (let [inputs (coerce-number-inputs spec inputs)
+          result (try {:value ((:logic spec) inputs outputs)} (catch :default e {:error e}))]
       (if (:error result)
         (app.json/->json {:ok false :errors [{:message (str ":logic threw: " (ex-message (:error result)))}]})
         (app.json/->json {:ok true :steps (:value result)})))

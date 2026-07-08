@@ -82,6 +82,12 @@ body {
   color: #a33;
 }
 
+.compute-error {
+  margin-top: 0.5rem;
+  color: #a33;
+  font-size: 0.85rem;
+}
+
 .generation-bad-source {
   margin-top: 0.5rem;
 }

@@ -1,10 +1,20 @@
 (ns app.render)
+;; No hiccup here carries an :on event handler. Replicant's :on registers a
+;; *native* cljrs.dom listener that calls into the main Repl the moment the
+;; DOM event fires -- and a native entry while a JS-initiated repl.eval() is
+;; still in flight panics the interpreter with "already borrowed" (a real
+;; production finding; see main.js's serializedEval note and doc/plan.md's
+;; milestone-3 notes). Interactive elements instead declare a :data-action
+;; attribute holding the action vector as EDN text; main.js's delegated
+;; listeners read it back and route it to app.core/dispatch! through the
+;; host's single serialized eval queue, so a user event can never interleave
+;; with any other Repl entry.
 
 (defn field-input
   "Real-world finding: :select was declared in the §4 contract from
   milestone 1 but this always rendered a plain text <input> regardless of
   :type -- never actually implemented, and never noticed because nothing
-  had generated a :select-typed calculator until now. `:on {:change ...}`
+  had generated a :select-typed calculator until now. The :data-action
   matches the dispatch!/:set-input handler in app.core, which looks the
   chosen option back up by its stringified :value to recover its original
   (possibly numeric) value -- HTML <select> values are always strings."
@@ -12,11 +22,11 @@
   [:label {:class "field"}
    [:span {:class "field-label"} label]
    (if (= type :select)
-     [:select {:value (str value) :on {:change [:set-input id]}}
+     [:select {:value (str value) :data-action (pr-str [:set-input id])}
       (map (fn [{:keys [value label]}] [:option {:value (str value)} label]) options)]
      [:input {:type (if (#{:number :integer} type) "number" "text")
               :value value
-              :on {:input [:set-input id]}}])
+              :data-action (pr-str [:set-input id])}])
    (when unit [:span {:class "field-unit"} unit])])
 
 (defn output-row [{:keys [id label format]} outputs]
@@ -39,11 +49,11 @@
   [:div {:class "source-panel"}
    [:textarea {:class "source-editor"
                :value draft-source
-               :on {:input [:edit-source]}}]
+               :data-action "[:edit-source]"}]
    (when source-error [:div {:class "source-error"} source-error])
    [:div {:class "source-actions"}
-    [:button {:on {:click [:apply-source]}} "Apply"]
-    [:button {:on {:click [:revert-source]}} "Revert"]]])
+    [:button {:data-action "[:apply-source]"} "Apply"]
+    [:button {:data-action "[:revert-source]"} "Revert"]]])
 
 (defn generation-panel
   "Milestone 3 (doc/plan.md §6): a description box that drives the
@@ -66,10 +76,10 @@
       [:span {:class "field-label"} "Describe a calculator"]
       [:input {:type "text" :value description :disabled busy?
                :placeholder "e.g. mortgage payments with extra principal"
-               :on {:input [:generation/edit-description]}}]]
+               :data-action "[:generation/edit-description]"}]]
      [:div {:class "generation-actions"}
       [:button {:disabled (or busy? (empty? trimmed))
-                :on {:click [:generation/submit]}}
+                :data-action "[:generation/submit]"}
        (cond
          (= status :installing) (str "Validating" (when (> attempt 1) (str " (attempt " attempt ")")) "…")
          (= status :streaming) (str "Generating" (when (> attempt 1) (str " (attempt " attempt ")")) "…")
@@ -89,14 +99,14 @@
            [:p {:class "generation-bad-source-label"} "What attempt " attempt " produced:"]
            [:pre {:class "generation-bad-source-code"} last-source]])
         [:div {:class "generation-error-actions"}
-         [:button {:on {:click [:generation/retry]}} "Retry"]
-         [:button {:on {:click [:generation/dismiss-error]}} "Dismiss"]]])]))
+         [:button {:data-action "[:generation/retry]"} "Retry"]
+         [:button {:data-action "[:generation/dismiss-error]"} "Dismiss"]]])]))
 
 (defn view
   "Pure function from app-state to hiccup. No DOM access here -- rendering
   and event dispatch both happen outside this namespace (app.core)."
   [{:keys [calc generation]}]
-  (let [{:keys [spec inputs outputs steps status ui]} calc
+  (let [{:keys [spec inputs input-text outputs compute-error steps status ui]} calc
         {:keys [show-logic? show-source? draft-source source-error]} ui]
     [:div {:class "page"}
      (generation-panel generation)
@@ -105,11 +115,18 @@
       (when (:description spec) [:p {:class "calculator-description"} (:description spec)])
       (when (= status :installing) [:p {:class "status-banner"} "Installing…"])
       [:div {:class "inputs"}
-       (map (fn [in] (field-input (assoc in :value (get inputs (:id in))))) (:inputs spec))]
+       ;; Fields display the text the user actually typed (:input-text),
+       ;; falling back to the parsed/default value for untouched fields --
+       ;; rendering the parsed value would rewrite the field mid-typing
+       ;; (see app.core's :input-text note).
+       (map (fn [in] (field-input (assoc in :value (or (get input-text (:id in))
+                                                       (get inputs (:id in))))))
+            (:inputs spec))]
       [:div {:class "outputs"}
        (map #(output-row % outputs) (:outputs spec))]
+      (when compute-error [:div {:class "compute-error"} compute-error])
       [:div {:class "reveal-controls"}
-       [:button {:on {:click [:toggle-logic]}} (if show-logic? "Hide logic" "Show logic")]
-       [:button {:on {:click [:toggle-source]}} (if show-source? "Hide source" "Show source")]]
+       [:button {:data-action "[:toggle-logic]"} (if show-logic? "Hide logic" "Show logic")]
+       [:button {:data-action "[:toggle-source]"} (if show-source? "Hide source" "Show source")]]
       (when show-logic? (logic-panel steps))
       (when show-source? (source-panel ui))]]))

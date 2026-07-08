@@ -1,18 +1,61 @@
 // JS host shell (doc/plan.md §2): boots cljrs-wasm, evals the bundled sources
-// into the main Repl, hands off to the app's boot! function, then runs a
-// poll loop draining effects the app queues for work only JS can do (the
-// sandbox worker protocol, §5) -- this interpreter has no way for Clojure
-// code to call back into JS on its own (§7), so JS has to come collect
-// pending effects rather than being handed them.
+// into the main Repl, hands off to the app's boot! function, then owns every
+// subsequent entry into that Repl: delegated DOM events and effect results
+// both arrive as eval'd calls into app.core, and the effects the app queues
+// (sandbox worker protocol §5, hosted generation §6) are drained right after
+// any eval that could have queued them -- this interpreter has no way for
+// Clojure code to call back into JS on its own (§7), so JS has to come
+// collect pending effects rather than being handed them.
+//
+// Two hard rules, both learned from real-device failures (doc/plan.md's
+// milestone-3 notes):
+//
+// 1. Exactly ONE entry into the main Repl at a time. cljrs-wasm's eval()
+//    yields to the browser event loop before its Promise resolves while
+//    still holding a RefCell borrow on interpreter state, so any *other*
+//    entry into the same Repl during that window -- a second eval(), or a
+//    native cljrs.dom event listener firing on a real click/keystroke --
+//    panics with "already borrowed" and aborts to a wasm trap. Worse than
+//    the error itself: a trap mid-replicant-render leaves replicant's
+//    internal :rendering? flag stuck, after which every later render
+//    silently queues forever and the UI never updates again (observed as a
+//    half-updated page that ignores newly installed calculators). So every
+//    eval goes through serializedEval() below, and the app renders NO
+//    native event handlers at all: hiccup carries data-action attributes
+//    (app.render), and the delegated listeners here feed them through the
+//    same serialized queue as everything else.
+//
+// 2. The Repl does no work at idle. Effects can only be queued by an eval
+//    this file itself initiates (dispatch!, handle-effect-result!, boot!),
+//    so draining after each of those is complete coverage -- there is no
+//    fixed-interval poll loop. The previous design polled take-effects!
+//    forever (60Hz at first, then 100ms, then 500ms as mobile Safari kept
+//    crash-looping over the sustained background CPU/memory pressure); all
+//    of that idle interpreter churn is gone, not just rarer.
 import init, { Repl } from '/build/wasm-shell/pkg/infinite_calculators_wasm_shell.js';
 import { sandbox } from './sandbox-manager.js';
 import { streamGenerate } from './generation-client.js';
-import { toEdn, unwrapClojureString } from './edn.js';
+import { toClojureString, toEdn, unwrapClojureString } from './edn.js';
 
-async function reportEffectResult(repl, payload) {
+let repl = null;
+
+// Rule 1: a single promise chain through which every eval on the main Repl
+// flows, so no two can ever be in flight together.
+let evalChain = Promise.resolve();
+function serializedEval(code) {
+  const run = evalChain.then(() => repl.eval(code));
+  evalChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+async function reportEffectResult(payload) {
   const call = `(app.core/handle-effect-result! ${toEdn(payload)})`;
-  const r = await repl.eval(call);
+  const r = await serializedEval(call);
   if (r.is_error) console.error('handle-effect-result! failed', r.result, call);
+  await drainEffects();
 }
 
 // The "generate" effect (doc/plan.md §6/§8) is the one effect that reports
@@ -29,7 +72,7 @@ async function reportEffectResult(repl, payload) {
 // scrolling by"), so it doesn't need the interpreter at all -- only the
 // final `generate-done`/`generate-error` result (one call, not dozens)
 // needs to reach app.core to drive the real pipeline.
-async function runGenerateEffect(repl, effect) {
+async function runGenerateEffect(effect) {
   const requestId = effect['request-id'];
   // Clear any text left over from a prior attempt (e.g. a repair retry) --
   // replicant never touches this node's content itself now (the hiccup
@@ -50,12 +93,12 @@ async function runGenerateEffect(repl, effect) {
       },
     );
     if (result.ok) {
-      await reportEffectResult(repl, { kind: 'generate-done', 'request-id': requestId, text: result.text });
+      await reportEffectResult({ kind: 'generate-done', 'request-id': requestId, text: result.text });
     } else {
-      await reportEffectResult(repl, { kind: 'generate-error', 'request-id': requestId, message: result.error });
+      await reportEffectResult({ kind: 'generate-error', 'request-id': requestId, message: result.error });
     }
   } catch (err) {
-    await reportEffectResult(repl, {
+    await reportEffectResult({
       kind: 'generate-error',
       'request-id': requestId,
       message: String((err && err.message) || err),
@@ -63,7 +106,7 @@ async function runGenerateEffect(repl, effect) {
   }
 }
 
-async function runEffect(repl, effect) {
+async function runEffect(effect) {
   const { kind } = effect;
   const calcId = effect['calc-id'];
   const requestId = effect['request-id'];
@@ -88,13 +131,117 @@ async function runEffect(repl, effect) {
     ...(kind === 'install' ? { source: effect.source } : {}),
     ...outcome,
   };
-  await reportEffectResult(repl, payload);
+  await reportEffectResult(payload);
+}
+
+// Rule 2: drain on demand, never on a timer. The draining/drainRequested
+// pair coalesces overlapping requests -- a drain asked for while one is
+// already running just makes the running loop take one more lap, so effects
+// queued by an eval that completed mid-drain are still picked up.
+let draining = false;
+let drainRequested = false;
+
+async function drainEffects() {
+  drainRequested = true;
+  if (draining) return;
+  draining = true;
+  try {
+    while (drainRequested) {
+      drainRequested = false;
+      const r = await serializedEval('(app.core/take-effects!)');
+      if (r.is_error) {
+        console.error('take-effects! failed', r.result);
+        return;
+      }
+      let effects = [];
+      try {
+        effects = JSON.parse(unwrapClojureString(r.result));
+      } catch (err) {
+        console.error('malformed effects payload', r.result);
+      }
+      for (const effect of effects) {
+        if (effect.kind === 'generate') {
+          // A generation streams for seconds; don't hold the sandbox
+          // effects behind it (typing into the already-running calculator
+          // keeps recomputing while a new one streams). Its done/error
+          // report re-enters through reportEffectResult -> drainEffects
+          // like everything else.
+          runGenerateEffect(effect).catch((err) => console.error('generate effect failed', err));
+        } else {
+          await runEffect(effect);
+        }
+      }
+    }
+  } finally {
+    draining = false;
+  }
+}
+
+// Delegated DOM events -> app.core/dispatch! evals. Bursts on the same
+// control are coalesced (each keystroke would otherwise queue its own
+// eval+render round trip while only the final value matters), but distinct
+// actions are never reordered.
+const pendingDispatches = [];
+let pumping = false;
+
+function queueDispatch(actionEdn, value) {
+  const last = pendingDispatches[pendingDispatches.length - 1];
+  if (last && last.actionEdn === actionEdn && last.value !== null && value !== null) {
+    last.value = value;
+  } else {
+    pendingDispatches.push({ actionEdn, value });
+  }
+  pumpDispatches();
+}
+
+async function pumpDispatches() {
+  if (pumping) return;
+  pumping = true;
+  try {
+    while (pendingDispatches.length > 0) {
+      const { actionEdn, value } = pendingDispatches.shift();
+      const call = `(app.core/dispatch! ${actionEdn} ${value === null ? 'nil' : toClojureString(value)})`;
+      const r = await serializedEval(call);
+      if (r.is_error) console.error('dispatch! failed', r.result, call);
+      await drainEffects();
+    }
+  } finally {
+    pumping = false;
+  }
+}
+
+// The app's hiccup carries no event handlers (rule 1): every interactive
+// element declares a data-action attribute (see app.render) whose value is
+// the dispatch action as EDN text, spliced verbatim into the dispatch!
+// call -- it only ever comes from our own render code, never from
+// generated-calculator data (titles/labels render as text nodes). Buttons
+// act on click, text-y controls on input, selects on change; disabled
+// controls fire none of these, so busy-state gating stays in the hiccup.
+function attachEventDelegation(rootEl) {
+  rootEl.addEventListener('click', (e) => {
+    const el = e.target.closest('[data-action]');
+    if (el && el.tagName === 'BUTTON') queueDispatch(el.dataset.action, null);
+  });
+  rootEl.addEventListener('input', (e) => {
+    const el = e.target;
+    if (el.dataset && el.dataset.action && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
+      queueDispatch(el.dataset.action, el.value);
+    }
+  });
+  rootEl.addEventListener('change', (e) => {
+    const el = e.target;
+    if (el.dataset && el.dataset.action && el.tagName === 'SELECT') {
+      queueDispatch(el.dataset.action, el.value);
+    }
+  });
 }
 
 async function main() {
   await init();
-  const repl = new Repl();
+  repl = new Repl();
 
+  // These two evals happen before any listener is attached, so they can't
+  // race anything -- no need for serializedEval yet.
   const bundleSource = await (await fetch('/dist/bundle.cljrs')).text();
   const bundleResult = await repl.eval(bundleSource);
   if (bundleResult.is_error) {
@@ -113,57 +260,8 @@ async function main() {
 
   window.__repl = repl; // dev/debugging convenience only
 
-  // Polls at a fixed cadence rather than every animation frame (60Hz):
-  // effects (sandbox install/compute/logic/generate round trips) already
-  // take tens of ms to seconds, so added latency here is imperceptible,
-  // and a constant eval() call into the interpreter -- even when idle --
-  // is real sustained CPU/memory pressure that mobile Safari's per-tab
-  // resource watchdog has been observed to crash-loop over ("A Problem
-  // Repeatedly Occurred") once real typing/dispatch! activity on the same
-  // Repl instance is layered on top of it.
-  //
-  // Real-world finding, more serious than the above: a native DOM-event
-  // callback (a real click/keystroke, dispatched by cljrs.dom/listen!
-  // straight into this same Repl, doc/plan.md §3) firing while this poll
-  // loop's `repl.eval()` call is still in flight produces a Rust
-  // `RefCell` "already borrowed" panic, which aborts to the wasm
-  // "unreachable code" trap -- confirmed via a browser stack trace showing
-  // both. This means cljrs-wasm's `eval()` yields control back to the
-  // browser's event loop at some point before its Promise resolves (only
-  // way a DOM event could interleave with it at all, JS being single-
-  // threaded) while apparently holding a borrow across that yield --
-  // which is a bug in the interpreter's own async implementation, not
-  // something fixable from application code. Widening the poll interval
-  // only shrinks the window during which this app's own eval() calls can
-  // collide with a native one; it does not eliminate the race (a native
-  // dispatch! could still overlap a *result-reporting* eval() call after
-  // an effect completes, regardless of poll cadence). File upstream against
-  // cljrs-wasm if this needs a real fix.
-  const POLL_INTERVAL_MS = 500;
-
-  async function tick() {
-    try {
-      const r = await repl.eval('(app.core/take-effects!)');
-      if (!r.is_error) {
-        let effects = [];
-        try {
-          effects = JSON.parse(unwrapClojureString(r.result));
-        } catch (err) {
-          console.error('malformed effects payload', r.result);
-        }
-        for (const effect of effects) {
-          if (effect.kind === 'generate') await runGenerateEffect(repl, effect);
-          else await runEffect(repl, effect);
-        }
-      } else {
-        console.error('take-effects! failed', r.result);
-      }
-    } catch (err) {
-      console.error('effect tick failed', err);
-    }
-    setTimeout(tick, POLL_INTERVAL_MS);
-  }
-  setTimeout(tick, POLL_INTERVAL_MS);
+  attachEventDelegation(document.getElementById('app'));
+  await drainEffects(); // boot! queued the golden calculator's install
 }
 
 main();
