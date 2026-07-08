@@ -287,6 +287,15 @@
 
         :else nil))
 
+    ;; :stream-error (optional) means the stream reported a failure after
+    ;; producing this text -- e.g. the provider's max_tokens truncation
+    ;; signal, which only arrives once everything before the cutoff has
+    ;; streamed. If the text still scans as one complete calculator form,
+    ;; the cutoff only cost trailing prose and the install proceeds as if
+    ;; nothing happened; if the scan fails, the stream error is the real
+    ;; story ("cut off by the token limit" beats "not valid Clojure" both
+    ;; for the user and for the repair prompt's truncation hint, see
+    ;; proxy/prompts.mjs), so it leads the combined message.
     "generate-done"
     (when (= request-id (get-in @app-state [:generation :request-id]))
       (let [source (app.genpipe/extract-source (:text result))
@@ -300,7 +309,12 @@
                          (assoc-in [:generation :last-source] source)
                          (assoc-in [:generation :install-request-id] install-req))))
             (queue-effect! {:kind "install" :request-id install-req :calc-id "main" :source source}))
-          (fail-generation! (app.genpipe/friendly-error (:errors scan)) source))))
+          (fail-generation!
+           (let [scan-message (app.genpipe/friendly-error (:errors scan))]
+             (if-let [stream-error (:stream-error result)]
+               (str stream-error "; " scan-message)
+               scan-message))
+           source))))
 
     "generate-error"
     (when (= request-id (get-in @app-state [:generation :request-id]))

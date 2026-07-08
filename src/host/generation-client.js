@@ -68,7 +68,14 @@ export async function streamGenerate({ description, attempt, priorSource, priorE
     }
   }
 
-  if (streamError) return { ok: false, error: streamError };
   await onToken(text);
+  // A stream error still returns whatever text arrived before it: the
+  // proxy only reports max_tokens truncation *after* the whole stream has
+  // been forwarded, and a model that finished the code block and then got
+  // cut off mid-postscript has produced a perfectly usable calculator.
+  // The caller decides whether the text is salvageable (main.js routes it
+  // through the normal extract/scan pipeline); discarding it here threw
+  // away complete calculators.
+  if (streamError) return { ok: false, error: streamError, text };
   return { ok: true, text };
 }

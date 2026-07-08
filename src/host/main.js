@@ -94,6 +94,21 @@ async function runGenerateEffect(effect) {
     );
     if (result.ok) {
       await reportEffectResult({ kind: 'generate-done', 'request-id': requestId, text: result.text });
+    } else if (result.text && result.text.trim()) {
+      // The stream failed *after* producing text -- most commonly the
+      // provider's max_tokens truncation signal, which arrives at the very
+      // end of the stream. That text often still contains a complete
+      // calculator (the model finished the fenced block, then got cut off
+      // adding prose after it), so hand it to the normal extract/scan
+      // pipeline instead of failing outright; app.core only surfaces the
+      // stream error if the extracted source doesn't scan as one complete
+      // form.
+      await reportEffectResult({
+        kind: 'generate-done',
+        'request-id': requestId,
+        text: result.text,
+        'stream-error': result.error,
+      });
     } else {
       await reportEffectResult({ kind: 'generate-error', 'request-id': requestId, message: result.error });
     }

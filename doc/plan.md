@@ -1059,3 +1059,37 @@ Open questions from milestone 3:
   text last typed per field, and `app.render` displays that (falling back to the
   parsed/default value for untouched fields); `:inputs` keeps the parsed values that
   `:compute` consumes. Reset on install so a new calculator's defaults show.
+- **Real-world finding: 3/3 real generations rejected, none of them actually bad.**
+  Two failure shapes, both in this codebase, not the model:
+  1. **"computation too expensive" (2/3):** the per-install fresh-worker respawn (the
+     OOM fix above) made every generated install pay wasm init + sandbox-bundle eval
+     *inside* `INSTALL_DEADLINE_MS`, because `_send`'s timer starts at `postMessage`
+     and a fresh worker only starts booting then. With interpreter evals measured at
+     200ms–1.3s (rapid-typing probe above), boot plus evaling the generated form plus
+     the smoke test actually running `:compute`/`:logic` (whose loops the system
+     prompt itself demands literal caps up to ~1200 iterations for) had no realistic
+     chance inside 2000ms — a budget that had been cut from the §5 design's 5000ms on
+     the strength of the mobile-Safari-crash theory *later disproven* (the crash was
+     the streaming preview, fixed structurally). Fixed twice over: the worker now
+     boots eagerly and posts a `{ready: true}` handshake, and `sandbox-manager.js`
+     waits for it (with a separate, looser `BOOT_DEADLINE_MS` backstop) before arming
+     any op's deadline, so boot is never billed to the op; and the deadlines are
+     restored to the §5 design values (5000/2000ms). The watchdog still bounds
+     runaway loops — it just no longer fires on the fixed cost of getting a worker
+     to the starting line.
+  2. **"cut off by the token limit" with a complete calculator visibly in the
+     streamed text (1/3):** the providers' `stop_reason`/`finish_reason` truncation
+     check (added in the silent-truncation finding above) throws *after* the entire
+     pre-cutoff stream has already been forwarded — and a model that finishes the
+     fenced block, then starts a prose postscript it never gets to end, trips it with
+     a perfectly complete calculator on the wire. `generation-client.js` returned
+     only the error and discarded the text. Now the text survives a stream error:
+     `main.js` routes errored-but-nonempty results through `generate-done` with a
+     `:stream-error` attached, and `app.core` runs the normal extract/symbol-scan; if
+     the source scans as one complete form the install proceeds (the cutoff cost
+     nothing but prose), and only if it doesn't is the failure surfaced — with the
+     truncation error *leading* the combined message, since "cut off by the token
+     limit" beats "not valid Clojure" both for the user and for `proxy/prompts.mjs`'s
+     `truncationHint` on the next repair turn. Both shapes are pinned by new
+     `test/e2e/generation.mjs` scenarios (`TRUNCATE_AFTER_CODE` must install,
+     `TRUNCATE_MID_CODE` must fail with the truncation message).
