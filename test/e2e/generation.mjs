@@ -148,8 +148,46 @@ try {
     'the last-good calculator keeps running after dismissing a failed generation',
   );
 
+  // Truncated stream, complete calculator: TRUNCATE_AFTER_CODE streams a
+  // complete fenced calculator, then some trailing prose, then the provider
+  // reports the max_tokens cutoff (matching how the real providers only
+  // learn about truncation at the end of the stream). The finished code
+  // block must be salvaged and installed as if nothing happened -- this
+  // exact case used to be rejected outright with a token-budget error
+  // despite a complete calculator sitting in the streamed text.
+  await page.fill('.generation-panel input', 'TRUNCATE_AFTER_CODE a tip calculator');
+  await page.dispatchEvent('.generation-panel input', 'input');
+  await page.click('.generation-panel button');
+  await page.waitForFunction(
+    () => document.querySelector('.generation-panel input')?.value === ''
+      && !document.querySelector('.generation-error'),
+    { timeout: 20000 },
+  );
+  assertEqual(
+    await page.textContent('.calculator-card h1'),
+    'Fake tip calculator',
+    'a calculator completed before the token cutoff still installs',
+  );
+  assertIncludes(await page.textContent('.outputs'), '$9.00', 'the salvaged calculator computes on its defaults');
+
+  // Truncated stream, incomplete calculator: TRUNCATE_MID_CODE cuts off
+  // inside the form, so there is nothing to salvage -- but the error shown
+  // (and fed to the repair prompt) must be the truncation one, not a bare
+  // parse error with the real cause discarded.
+  await page.fill('.generation-panel input', 'TRUNCATE_MID_CODE a tip calculator');
+  await page.dispatchEvent('.generation-panel input', 'input');
+  await page.click('.generation-panel button');
+  await page.waitForSelector('.generation-error', { timeout: 20000 });
+  assertIncludes(
+    await page.textContent('.generation-error'),
+    'cut off by the token limit',
+    'a truncated-mid-form generation reports the token cutoff as the cause',
+  );
+  await page.click('.generation-error-actions >> text=Dismiss');
+  await page.waitForFunction(() => !document.querySelector('.generation-error'), { timeout: 5000 });
+
   assertEqual(pageErrors.length, 0, 'no uncaught page errors');
-  console.log('PASS: generation pipeline installs on first success, shows a failure with its bad source, recovers via manual retry, and dismiss clears a failure cleanly');
+  console.log('PASS: generation pipeline installs on first success, shows a failure with its bad source, recovers via manual retry, dismiss clears a failure cleanly, and a token-limit cutoff only fails when the calculator is actually incomplete');
 } finally {
   if (browser) await browser.close();
   httpServer.kill();

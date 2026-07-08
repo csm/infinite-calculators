@@ -11,21 +11,37 @@
 import init, { Repl } from '/build/wasm-shell/pkg/infinite_calculators_wasm_shell.js';
 import { toClojureString, toEdn, unwrapClojureString } from './edn.js';
 
-let repl = null;
-let bundleTextPromise = null;
+let replPromise = null;
 
-async function ensureRepl() {
-  if (repl) return repl;
-  await init();
-  repl = new Repl();
-  if (!bundleTextPromise) {
-    bundleTextPromise = fetch('/dist/sandbox-bundle.cljrs').then((r) => r.text());
+function ensureRepl() {
+  // Memoized as a promise, not a value: boot starts eagerly below while the
+  // first op's message may already be queued behind it, so two callers can
+  // overlap -- both must share the one init()/bundle-eval in flight rather
+  // than each booting a second Repl into the same wasm instance.
+  if (!replPromise) {
+    replPromise = (async () => {
+      await init();
+      const repl = new Repl();
+      const bundleText = await fetch('/dist/sandbox-bundle.cljrs').then((r) => r.text());
+      const r = await repl.eval(bundleText);
+      if (r.is_error) throw new Error('sandbox bundle eval failed: ' + r.result);
+      return repl;
+    })();
   }
-  const bundleText = await bundleTextPromise;
-  const r = await repl.eval(bundleText);
-  if (r.is_error) throw new Error('sandbox bundle eval failed: ' + r.result);
-  return repl;
+  return replPromise;
 }
+
+// Boot eagerly and tell the owner when the Repl is actually usable:
+// sandbox-manager.js holds every op's watchdog timer until this handshake
+// arrives, so wasm init + sandbox-bundle eval (interpreter evals here run
+// hundreds of ms on real hardware, see doc/plan.md's milestone-3 notes)
+// never count against an install's or compute's deadline. Real generated
+// calculators were being rejected as "computation too expensive" purely
+// because the per-install fresh-worker boot ate the budget.
+ensureRepl().then(
+  () => self.postMessage({ ready: true }),
+  (err) => self.postMessage({ ready: false, error: 'sandbox worker failed to boot: ' + String((err && err.message) || err) }),
+);
 
 function parseSandboxResponse(evalResult) {
   if (evalResult.is_error) {
