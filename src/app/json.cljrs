@@ -38,7 +38,16 @@
     (nil? v) "null"
     (true? v) "true"
     (false? v) "false"
-    (number? v) (str v)
+    ;; Real-world finding: Clojure's exact arithmetic over integer inputs
+    ;; produces ratios ((* 1 (/ 18 100)) => 9/50), and (str 9/50) is not
+    ;; valid JSON -- it silently broke every compute reply whose math didn't
+    ;; divide evenly (JSON.parse threw, the reply was dropped, and the
+    ;; outputs just stopped updating). Integer inputs are the normal case,
+    ;; not an edge: JSON itself has no int/double distinction, so 1.0
+    ;; degrades to 1 crossing the JS boundary and comes back an integer.
+    ;; Promote every non-integer number through double so what's emitted is
+    ;; always JSON-representable.
+    (number? v) (if (integer? v) (str v) (str (* 1.0 v)))
     (keyword? v) (quoted (str keyword-marker (name v)))
     (string? v) (quoted v)
     (map? v) (str "{" (str/join "," (map (fn [[k val]] (str (key->json k) ":" (->json val))) v)) "}")

@@ -3,9 +3,12 @@
 ;; (doc/plan.md §5), not as a local pure fn. Because this interpreter has no
 ;; way for Clojure code to call back into JS on its own (§7 -- the only entry
 ;; point into a Repl is JS calling .eval()), sandbox work is queued as data
-;; in :effects and drained by the JS host's poll loop (src/host/main.js),
-;; which performs it (via src/host/sandbox-manager.js) and reports the
-;; result back by eval'ing a call to handle-effect-result!.
+;; in :effects and drained by the JS host (src/host/main.js), which performs
+;; it (via src/host/sandbox-manager.js) and reports the result back by
+;; eval'ing a call to handle-effect-result!. Draining is event-driven, not
+;; polled: effects can only be queued by an eval main.js itself initiates
+;; (dispatch!, handle-effect-result!, boot!), so main.js drains right after
+;; each of those and the Repl does no work at idle.
 
 (def golden-calculator-source
   "The milestone-1 tip calculator, rewritten to the real §4 contract:
@@ -30,8 +33,21 @@
   (atom {:calc {:source golden-calculator-source
                 :status :installing        ; :installing | :ready | :error
                 :spec nil                  ; {:title :description :inputs :outputs}
-                :inputs {}
+                :inputs {}                 ; parsed values, what :compute receives
+                ;; What each input *displays*: the exact text the user last
+                ;; typed, keyed by field id. Rendering from the parsed value
+                ;; instead corrupts typing: "1" parses to the double 1.0,
+                ;; and any render mid-typing writes its stringification
+                ;; ("1.0") back over the field, so the user's next "0"
+                ;; produces "1.00" instead of "10" (observed under a real
+                ;; rapid-typing probe). Reset on install so new defaults
+                ;; show.
+                :input-text {}
                 :outputs {}
+                ;; Last failed compute's message, shown on the card --
+                ;; failures used to be dropped silently, leaving stale
+                ;; outputs with no hint anything went wrong.
+                :compute-error nil
                 :steps []
                 :install-request-id nil
                 :compute-request-id nil
@@ -69,10 +85,11 @@
     (replicant.dom/render el (app.render/view @app-state))))
 
 (defn take-effects!
-  "Called by the JS host's poll loop once per tick (see main.js) -- this
-  interpreter has no way for Clojure code to reach out to JS on its own
-  (§7), so effects are collected here instead of pushed. Returns a JSON
-  string (an array, possibly empty) and clears the queue."
+  "Called by the JS host after any eval that can have queued effects (see
+  main.js's drainEffects) -- this interpreter has no way for Clojure code to
+  reach out to JS on its own (§7), so effects are collected here instead of
+  pushed. Returns a JSON string (an array, possibly empty) and clears the
+  queue."
   []
   (let [effects (:effects @app-state)]
     (swap! app-state assoc :effects [])
@@ -119,14 +136,32 @@
   (swap! app-state update :generation merge {:status :error :error error-message}))
 
 (defn dispatch!
-  "Registered with replicant.dom/set-dispatch! in boot!. `event` is the map
-  replicant.core/build-event-map produces (carries :replicant/node, the DOM
-  node the handler fired on); `action` is the hiccup :on data."
-  [event action]
+  "Called by the JS host (main.js) when a delegated DOM event fires on an
+  element carrying a :data-action attribute (see app.render's ns note).
+  `action` is that attribute read back as data; `value` is the element's
+  current DOM value as a string (inputs/selects/textareas) or nil (button
+  clicks). Events reach this Repl only through the host's serialized eval
+  queue -- never as native cljrs.dom listeners -- so a dispatch can never
+  interleave with another in-flight eval and trip the interpreter's
+  'already borrowed' re-entrancy panic (doc/plan.md milestone-3 notes)."
+  [action value]
   (case (first action)
+    ;; The three text-entry actions below deliberately do NOT call render!.
+    ;; A full render is interpreter-priced -- measured at 200ms-1.3s per call
+    ;; with the logic/source panels open -- and running one per keystroke
+    ;; made typing outrun the serialized eval queue by an order of magnitude
+    ;; (the pre-polish design paid the same cost synchronously inside every
+    ;; native keystroke callback). None of them needs it: the edited
+    ;; control's DOM already shows exactly what the user typed, and every
+    ;; *other* thing their state feeds re-renders when its own event lands
+    ;; (outputs when the compute result arrives; the source draft only
+    ;; matters once Apply is clicked). The vdom's stale :value for the
+    ;; edited control is harmless -- the next render diffs against it and
+    ;; writes the current state value, which equals what the DOM already
+    ;; shows.
     :set-input
     (let [field (second action)
-          raw (cljrs.dom/value (:replicant/node event))
+          raw value
           input-spec (first (filter #(= (:id %) field) (get-in @app-state [:calc :spec :inputs])))
           ;; A <select>'s DOM value is always a string, but the option's
           ;; declared :value can be numeric (app.render/field-input renders
@@ -139,8 +174,8 @@
                    (:value (first (filter #(= (str (:value %)) raw) (:options input-spec))))
                    :else raw)]
       (swap! app-state assoc-in [:calc :inputs field] parsed)
-      (queue-compute!)
-      (render!))
+      (swap! app-state assoc-in [:calc :input-text field] raw)
+      (queue-compute!))
 
     :toggle-logic
     (do
@@ -156,9 +191,7 @@
       (render!))
 
     :edit-source
-    (let [text (cljrs.dom/value (:replicant/node event))]
-      (swap! app-state assoc-in [:calc :ui :draft-source] text)
-      (render!))
+    (swap! app-state assoc-in [:calc :ui :draft-source] value)
 
     :apply-source
     (let [draft (get-in @app-state [:calc :ui :draft-source])
@@ -175,9 +208,13 @@
       (render!))
 
     :generation/edit-description
-    (let [text (cljrs.dom/value (:replicant/node event))]
-      (swap! app-state assoc-in [:generation :description] text)
-      (render!))
+    ;; No render per keystroke (see :set-input's note above), with one
+    ;; exception: the Generate button's disabled state tracks whether the
+    ;; description is blank, so render exactly when that flips.
+    (let [blank? #(empty? (clojure.string/trim (or % "")))
+          was-blank? (blank? (get-in @app-state [:generation :description]))]
+      (swap! app-state assoc-in [:generation :description] value)
+      (when (not= was-blank? (blank? value)) (render!)))
 
     :generation/submit
     (do
@@ -224,7 +261,9 @@
                              (assoc-in [:calc :source] (:source result))
                              (assoc-in [:calc :spec] (:spec result))
                              (assoc-in [:calc :inputs] (app.contract/defaults (:inputs (:spec result))))
+                             (assoc-in [:calc :input-text] {})
                              (assoc-in [:calc :outputs] (:outputs result))
+                             (assoc-in [:calc :compute-error] nil)
                              (assoc-in [:calc :steps] (:steps result))
                              (assoc-in [:calc :status] :ready)
                              (assoc-in [:calc :ui :source-error] nil)
@@ -269,7 +308,13 @@
 
     "compute"
     (when (= request-id (get-in @app-state [:calc :compute-request-id]))
-      (when ok (swap! app-state assoc-in [:calc :outputs] (:outputs result))))
+      (if ok
+        (swap! app-state update :calc merge {:outputs (:outputs result) :compute-error nil})
+        ;; Surface it: a dropped failure looks like "the outputs just
+        ;; stopped updating", which is indistinguishable from half the
+        ;; other bugs this milestone chased.
+        (swap! app-state assoc-in [:calc :compute-error]
+               (clojure.string/join "; " (map :message (:errors result))))))
 
     "logic"
     (when (= request-id (get-in @app-state [:calc :logic-request-id]))
@@ -279,7 +324,9 @@
   (render!))
 
 (defn boot! []
-  (replicant.dom/set-dispatch! dispatch!)
+  ;; No replicant.dom/set-dispatch! here: the hiccup carries no :on handlers
+  ;; at all (see app.render's ns note). DOM events are delegated in JS and
+  ;; arrive as dispatch! evals on the host's serialized queue instead.
   (reset! root-el (cljrs.dom/by-id "app"))
   (let [req-id (next-request-id!)]
     (swap! app-state assoc-in [:calc :install-request-id] req-id)

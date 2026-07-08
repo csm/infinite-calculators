@@ -90,8 +90,11 @@ adding it to the `PROVIDERS` map in `proxy/server.mjs`.
   `handle-effect-result!` cases.
 - `src/sandbox/` — code eval'd into each calculator's own sandbox Repl: the
   `calculator` constructor and the install/compute/logic op handlers a worker calls.
-- `src/host/` — the JS shell. `main.js` boots the main Repl and runs the effect poll
-  loop (Clojure can't call back into JS on its own, see `doc/plan.md` §7);
+- `src/host/` — the JS shell. `main.js` boots the main Repl, owns the single
+  serialized eval queue that is the only way anything enters that Repl (DOM events
+  are delegated in JS and dispatched through it — no native event listeners, see
+  `doc/plan.md` §7's re-entrancy note), and drains the app's effect queue after any
+  eval that could have filled it (Clojure can't call back into JS on its own, §7);
   `sandbox-worker.js` is what runs inside each calculator's Worker;
   `sandbox-manager.js` owns those workers from the main thread and enforces the
   watchdog deadline; `generation-client.js` streams a generation from the proxy and

@@ -44,6 +44,16 @@ class CalcWorker {
   }
 
   _respawn() {
+    // Fail any request still pending on the worker being terminated: its
+    // reply can never arrive, so leaving it in the map would strand its
+    // caller until its deadline timer fired -- and that timer would then
+    // _respawn() *again*, killing whatever the fresh worker was busy with
+    // (e.g. the install that triggered this respawn in the first place).
+    for (const [, p] of this.pending) {
+      clearTimeout(p.timer);
+      p.resolve({ ok: false, errors: [{ message: 'sandbox worker was recycled' }] });
+    }
+    this.pending.clear();
     this.worker.terminate();
     this._spawn();
   }

@@ -186,14 +186,23 @@ plain `(render app-state) → hiccup` function; rendering and updates go straigh
 (replicant.dom/render root-el (render @app-state))
 ```
 
-Events are wired the same way replicant does it everywhere: hiccup carries
-`[:on {:click [:calc/set-input calc-id :rate]} ...]`-style data handlers, and
-`(replicant.dom/set-dispatch! f)` is set once at boot to a function that receives
-`(event action)` and applies the action to `app-state` (then re-renders). Because
-`cljrs.dom/listen!` registers the callback natively and invokes it inside the same Repl,
-**no event ever needs to cross the JS boundary** — the JS shell's only job is booting
-the wasm module, evaling the bundled sources once, and handling the few things cljrs
-genuinely cannot do itself (WebLLM, `fetch`, `localStorage`, worker management — §7).
+Events were originally wired the way replicant does it everywhere: hiccup carried
+`[:on {:click [:calc/set-input calc-id :rate]} ...]`-style data handlers, dispatched
+natively via `cljrs.dom/listen!` inside the same Repl, so no event crossed the JS
+boundary. **Reversed in the milestone-3 polish round**: a native listener entering the
+Repl while a JS-initiated `eval()` is still in flight panics the interpreter with
+`already borrowed` (see the confirmed re-entrancy finding in §13's milestone-3 notes),
+and since `eval()` calls are unavoidable (that's how effect results get back in, §7),
+native event entry had to go, not the evals. The hiccup now carries **no `:on` handlers
+at all**; interactive elements declare a `data-action` attribute (the action vector as
+EDN text), and three delegated JS listeners on the app root (`main.js`) read it back and
+route it to `(app.core/dispatch! action value)` through the host's single serialized
+eval queue — so every entry into the main Repl, user events included, is strictly
+serialized and the panic is structurally impossible rather than just rare. The dispatch
+data itself is unchanged (`dispatch!` still applies an action vector to `app-state` and
+re-renders); only the transport moved from native listeners to the JS boundary, at
+per-user-event frequency (with same-control bursts coalesced JS-side), which the string
+boundary handles easily.
 
 Rendering therefore needs no protocol of its own distinct from replicant's; `render.cljrs`
 just returns hiccup, same as any replicant app. The former Phase A/B split is gone —
@@ -442,16 +451,20 @@ Consequences and plan:
   freshly-read form just splices it into the next `.eval()` call as text (e.g.
   `(def installed-calc <source-text>)`) instead of calling a Clojure-level `eval` on an
   already-read form.
-- **JS can never call back into a Repl on its own — only poll it.** Since events are
-  handled entirely inside the Repl (previous bullet) with no round-trip per click, JS
-  has no hook telling it "an effect is now pending." What's actually built (§3's
-  `app.core`): actions that need the sandbox queue a plain-data effect into
-  `app-state`'s `:effects`; the JS host runs a `requestAnimationFrame` loop calling
-  `(app.core/take-effects!)` every frame, performs whatever it finds via
-  `sandbox-manager.js`, and reports each result back with a *fresh* `.eval()` call to
-  `(app.core/handle-effect-result! {...})`. This works because the Repl's vars/atoms
-  persist across separate `.eval()` calls even though `*ns*`-relative resolution
-  doesn't (§0) — `handle-effect-result!` is always called fully-qualified.
+- **JS can never call back into a Repl on its own — only poll it.** Originally this
+  meant a fixed-cadence poll loop (`requestAnimationFrame`, later a 100ms then 500ms
+  `setTimeout` as real devices kept objecting — see §13's milestone-3 notes): actions
+  that need the sandbox queue a plain-data effect into `app-state`'s `:effects`, the
+  loop called `(app.core/take-effects!)` on every tick, performed whatever it found via
+  `sandbox-manager.js`, and reported each result back with a *fresh* `.eval()` call to
+  `(app.core/handle-effect-result! {...})`. **Polling is gone entirely (milestone-3
+  polish round)**: once DOM events also enter the Repl from JS (§3's delegation change),
+  *every* eval that can possibly queue an effect — `dispatch!`,
+  `handle-effect-result!`, `boot!` — is one main.js itself initiates, so main.js just
+  drains `take-effects!` immediately after each of those and the Repl does literally
+  nothing at idle. Same mechanism, event-driven instead of timed; effect latency went
+  *down* (no up-to-500ms wait) while idle CPU went to zero. The vars/atoms-persist
+  property is unchanged — `handle-effect-result!` is always called fully-qualified.
 - **JSON, not EDN, for the string payloads, with one hand-rolled wrinkle.** `app.json/
   ->json` (Clojure→JSON) and `src/host/edn.js`'s `toEdn` (JS→Clojure source) replace the
   EDN-string idea above, because JS can `JSON.parse` natively but has no EDN reader.
@@ -772,12 +785,14 @@ Open questions from milestone 3:
   browser's event loop at some point before its Promise resolves (the only way a DOM
   event could interleave with it at all, JS being single-threaded) while apparently
   holding a borrow across that yield -- **a bug in the interpreter's own async
-  implementation, not fixable from this codebase.** Mitigated, not fixed: the main
-  poll loop's interval was widened (100ms → 500ms, `src/host/main.js`) to shrink the
-  collision window; this reduces frequency but cannot eliminate the race, since a
-  native `dispatch!` can still overlap a *result-reporting* `eval()` call after any
-  effect completes (install/compute/logic/generate), independent of poll cadence.
-  **File this upstream against `cljrs-wasm`** — it's the only path to an actual fix.
+  implementation, not fixable from this codebase.** Initially mitigated, not fixed, by
+  widening the poll loop's interval (100ms → 500ms) to shrink the collision window.
+  **Now resolved structurally (milestone-3 polish round)** by removing native event
+  entry into the main Repl altogether — see the polish-round finding at the end of this
+  list. Still worth filing upstream against `cljrs-wasm` (holding a borrow across an
+  await is a real interpreter bug, and native listeners remain unusable on any Repl
+  that also takes `eval()` calls until it's fixed), but this app no longer depends on
+  the fix.
 - No real hosted-model API key has been exercised against `proxy/providers/anthropic.mjs`
   or `proxy/providers/together.mjs` yet; the few-shot examples in `prompts/examples.json`
   are believed to stay within the §4 dialect subset but haven't been eval'd against the
@@ -956,3 +971,91 @@ Open questions from milestone 3:
   than solving it: instead of trusting the interpreter to reclaim a redefined
   namespace's memory, every install just gets memory the OS/browser has already fully
   reclaimed from a terminated worker.
+- **Milestone-3 polish round — the `already borrowed` re-entrancy race fixed
+  structurally, and with it two symptoms that looked unrelated.** Post-milestone
+  real-world state: interaction produced frequent `already borrowed` errors, a freshly
+  generated calculator often *didn't replace the UI* (or replaced it half-way, new
+  inputs over stale outputs), and the page burned CPU even when idle. All three trace
+  back to the same two design decisions, both now reversed:
+  1. **Native DOM listeners are gone from the main Repl.** The `:on`-handler wiring
+     (§3 as originally built) meant every click/keystroke entered the Repl natively,
+     racing whatever `eval()` was in flight — the confirmed borrow-panic finding above.
+     The truly damaging consequence was downstream of the panic itself: the trap aborts
+     whatever the in-flight eval was doing, and when that was a `replicant.dom/render`,
+     replicant's internal `:rendering?` flag for the root element stays stuck `true` —
+     after which **every subsequent render is silently queued and never runs**
+     (`replicant.dom/render`'s re-entrancy guard queues and relies on the *active*
+     render to pick the queue up; there is no active render left after a trap). That is
+     exactly the observed "install succeeded but the calculator never showed up /
+     showed up half-patched" behavior — one mid-render trap freezes the UI for the rest
+     of the session while state updates keep landing invisibly. Fix (§3, updated):
+     hiccup now carries `data-action` attributes instead of `:on` handlers; `main.js`
+     delegates click/input/change on the app root and feeds
+     `(app.core/dispatch! action value)` through the same serialized eval queue as
+     everything else. `replicant.dom/set-dispatch!` is no longer used at all.
+  2. **Every eval on the main Repl is serialized through one JS promise chain**
+     (`main.js`'s `serializedEval`), so two JS-initiated evals can't overlap either
+     (previously prevented only implicitly by the poll loop's sequential `await`s), and
+     **the fixed-interval poll loop is deleted** rather than widened again: with user
+     events now arriving via JS, every eval that can queue an effect (`dispatch!`,
+     `handle-effect-result!`, `boot!`) is initiated by `main.js` itself, so it drains
+     `take-effects!` right after each of those instead of on a timer. Idle Repl
+     activity is now zero (previously an eval every 500ms forever — the "resource hog
+     even when not doing much"), and effect pickup latency *improved* (immediate vs.
+     up-to-500ms). Generation effects are additionally no longer awaited inline by the
+     drain loop, so a multi-second stream doesn't block the running calculator's
+     compute/logic round trips the way it did under the sequential tick.
+  Also fixed while in there: `sandbox-manager.js`'s `_respawn()` now fails-fast any
+  requests still pending on the terminated worker. Previously they just dangled until
+  their own deadline timers fired, each of which called `_respawn()` *again* and killed
+  whatever the replacement worker was busy with (e.g. the very install that triggered
+  the first respawn) — a latent cascade that the per-install respawn made much easier
+  to hit.
+- **Polish-round finding (from a rapid-typing Playwright probe, not a report): a full
+  render costs 200ms–1.3s in this interpreter, so per-keystroke renders can't work.**
+  With the logic + source panels open, each `dispatch!` eval that ended in a `render!`
+  measured >1.3s (instrumented via a wrapped `repl.eval`); typing at natural speed
+  outran the serialized queue indefinitely and the app looked wedged. The pre-polish
+  design paid this exact cost synchronously inside every native keystroke callback —
+  on the main thread, per keystroke — which is a big slice of the "resource hog" and
+  mobile-Safari-pressure story all by itself. Fix: the three text-entry actions
+  (`:set-input`, `:edit-source`, `:generation/edit-description`) no longer render at
+  all. None of them needs to: the edited control's DOM already shows exactly what the
+  user typed, and everything *else* their state feeds re-renders when its own event
+  lands (outputs render when the compute result arrives; the source draft matters only
+  once Apply is clicked; the Generate button's blank-description gate is the one
+  exception, handled by rendering exactly when blankness flips). Dispatch evals
+  dropped from ~1.3s to ~3ms. JS-side burst coalescing (same control, latest value
+  wins) covers whatever's left.
+- **Polish-round finding, pre-existing and severe: compute replies silently broke
+  whenever the math didn't divide evenly, which is most of the time.** The same probe
+  showed every `compute` result coming back `:ok false` with `bad response from
+  sandbox: {"ok":true,"outputs":{"tip":9/50,...}}` — `app.json/->json` stringified a
+  Clojure **ratio** straight into the "JSON", `JSON.parse` threw, and (compounding it)
+  `handle-effect-result!`'s `compute` branch ignored failures entirely, so the outputs
+  just silently stopped updating — yet another contributor to "the UI is only half
+  updated," and one that predates milestone 3 (the e2e suite never caught it because
+  its test values happen to divide evenly: 100 × 20% is exact; 1 × 18% = 9/50 is not).
+  Ratios are the *normal* case, not an edge: JSON has no int/double distinction, so the
+  `1.0` a `:number` input parses to crosses the worker boundary as `1` and comes back
+  an integer, and integer division in Clojure is exact. Fixed in four layers, each
+  independently justified: (1) `->json` promotes any non-integer number through double
+  (`9/50` → `0.18`) so its output is always JSON-representable; (2)
+  `sandbox.protocol` coerces `:number`-declared inputs to doubles before calculator
+  code sees them (both restoring the declared type the boundary degraded and keeping
+  native math fns away from the unexpected-integer panics found earlier);
+  (3) `app.contract/smoke-test`'s finiteness check now coerces through double before
+  `finite?`, which is float-specific and fails a genuinely-finite ratio (same bug
+  class as the two `finite?`/`Math-round` findings above — third occurrence, same
+  lesson); (4) a failed compute now surfaces on the card (`:calc :compute-error`,
+  `.compute-error`) instead of being dropped.
+- **Polish-round finding: rendering an input's parsed value corrupts typing.** Typing
+  `100` produced `1.000`: "1" parses to the double `1.0`, a render landing mid-typing
+  (e.g. a compute result) wrote its stringification `"1.0"` back over the field, and
+  the user's next "0" appended to *that*. Predates the polish round (the old design's
+  synchronous per-keystroke render wrote the same rewrite every keystroke); the e2e
+  tests never typed per-keystroke into a number field (Playwright `fill` replaces
+  atomically), so it went unseen. Fix: `:calc` keeps an `:input-text` map of the exact
+  text last typed per field, and `app.render` displays that (falling back to the
+  parsed/default value for untouched fields); `:inputs` keeps the parsed values that
+  `:compute` consumes. Reset on install so a new calculator's defaults show.
